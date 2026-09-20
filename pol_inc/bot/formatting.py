@@ -4,7 +4,7 @@ from html import escape
 
 from pol_inc.domain.enums import SessionStatus
 from pol_inc.domain.packs import GameEvent, GamePack, ResourceDelta
-from pol_inc.domain.session import Player, Session, TurnResolution
+from pol_inc.domain.session import Party, Player, Session, TurnResolution
 
 STATUS_LABELS = {
     SessionStatus.NEW: "Новая",
@@ -253,3 +253,32 @@ def format_final(session: Session) -> list[str]:
         )
 
     return lines
+
+
+def format_party_card(
+    party: Party,
+    president_name: str,
+    is_creator: bool = False,
+    percent: int | None = None,
+    influence: int | None = None,
+) -> str:
+    crown = "👑 " if is_creator else ""
+    lines = [
+        f"🎖 <b>{esc(party.name)}</b>",
+        f"{crown}Президент: {esc(president_name)}",
+        f"Идеология: {esc(party.ideology)}",
+    ]
+
+    if party.slogan:
+        lines.append(f"Слоган: «{esc(party.slogan)}»")
+
+    if party.line:
+        lines.append("")
+        lines.append("<b>Линия партии:</b>")
+        lines.append(esc(party.line))
+
+    if percent is not None and influence is not None:
+        lines.append("")
+        lines.append(f"Рейтинг: {percent}% · {influence}v")
+
+    return "\n".join(lines)

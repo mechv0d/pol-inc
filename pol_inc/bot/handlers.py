@@ -7,9 +7,16 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from pol_inc.application.packs import PackService
+from pol_inc.application.parties import PartyRepository
 from pol_inc.application.sessions import SessionManager
 from pol_inc.config import Settings
 from pol_inc.domain.enums import SessionStatus
@@ -21,6 +28,7 @@ from .formatting import (
     format_final,
     format_lobby,
     format_pack_list,
+    format_party_card,
     format_resolution,
     format_session,
     format_turn,
@@ -39,6 +47,20 @@ class RegStates(StatesGroup):
     name = State()
     slogan = State()
     ideology = State()
+    line = State()
+    photo = State()
+
+
+SKIP_PHOTO_CALLBACK = "reg:skip_photo"
+PARTY_CAPTION_LIMIT = 1024
+
+
+def _skip_photo_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Пропустить", callback_data=SKIP_PHOTO_CALLBACK)]
+        ]
+    )
 
 
 def _chunk_lines(lines: list[str], limit: int = MESSAGE_CHUNK_LIMIT) -> list[str]:
@@ -296,6 +318,111 @@ async def game(
         lines.extend(format_pack_list(metas))
 
     await send_lines(bot, message.chat.id, lines)
+
+
+async def send_party_card(
+    bot: Bot,
+    chat_id: int,
+    party_repo: PartyRepository,
+    party,
+    president_name: str,
+    is_creator: bool = False,
+    percent: int | None = None,
+    influence: int | None = None,
+) -> None:
+    caption = format_party_card(
+        party,
+        president_name,
+        is_creator=is_creator,
+        percent=percent,
+        influence=influence,
+    )
+
+    photo_bytes: bytes | None = None
+    if party.photo_object:
+        try:
+            photo_bytes = await party_repo.get_photo(party.photo_object)
+        except Exception:
+            logger.warning("Не удалось загрузить фото партии %s", party.photo_object)
+            photo_bytes = None
+
+    if photo_bytes is not None:
+        photo = BufferedInputFile(photo_bytes, filename="party.jpg")
+
+        if len(caption) <= PARTY_CAPTION_LIMIT:
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+            return
+
+        await send_lines(bot, chat_id, [caption])
+        await bot.send_photo(
+            chat_id=chat_id, photo=photo, caption=f"🎖 <b>{esc(party.name)}</b>"
+        )
+        return
+
+    await send_lines(bot, chat_id, [caption])
+
+
+@router.message(Command("parties"))
+async def parties(
+    message: Message,
+    session_manager: SessionManager,
+    party_repo: PartyRepository,
+    bot: Bot,
+) -> None:
+    session = None
+    if message.chat.type in GROUP_TYPES:
+        session = session_manager.get_by_chat(message.chat.id)
+
+    if session is not None:
+        registered = [
+            player for player in session.players.values() if player.party is not None
+        ]
+
+        if not registered:
+            await message.answer("В этой сессии пока нет зарегистрированных партий.")
+            return
+
+        in_game = session.status == SessionStatus.IN_GAME
+        await bot.send_message(
+            chat_id=message.chat.id,
+            text=f"<b>Партии сессии <code>{esc(session.code)}</code>:</b>",
+        )
+
+        for player in registered:
+            assert player.party is not None
+            await send_party_card(
+                bot,
+                message.chat.id,
+                party_repo,
+                player.party,
+                player.public_name,
+                is_creator=player.user_id == session.creator_id,
+                percent=player.percent if in_game else None,
+                influence=player.influence if in_game else None,
+            )
+        return
+
+    if message.from_user is None:
+        return
+
+    try:
+        party = await session_manager.get_persisted_party(message.from_user.id)
+    except Exception:
+        party = None
+
+    if party is None:
+        await message.answer(
+            "У вас пока нет партии. Зарегистрируйте её в личных сообщениях бота: /reg"
+        )
+        return
+
+    await send_party_card(
+        bot,
+        message.chat.id,
+        party_repo,
+        party,
+        message.from_user.full_name,
+    )
 
 
 @router.message(Command("newgame"))
@@ -595,12 +722,12 @@ async def reg(
         await message.answer(
             f"У вас уже есть партия «{esc(party_name)}». "
             "Вы можете её перезаписать.\n\n"
-            "Шаг 1/3. Отправьте название партии (до 30 символов).\n"
+            "Шаг 1/5. Отправьте название партии (до 30 символов).\n"
             "Отмена: /cancel"
         )
     else:
         await message.answer(
-            "Шаг 1/3. Отправьте название партии (до 30 символов).\n"
+            "Шаг 1/5. Отправьте название партии (до 30 символов).\n"
             "Отмена: /cancel"
         )
 
@@ -636,7 +763,7 @@ async def reg_name(
     await state.set_state(RegStates.slogan)
 
     await message.answer(
-        "Шаг 2/3. Отправьте слоган партии (до 50 символов).\n"
+        "Шаг 2/5. Отправьте слоган партии (до 50 символов).\n"
         "Если слоган не нужен, отправьте: -"
     )
 
@@ -664,7 +791,7 @@ async def reg_slogan(
     await state.update_data(slogan=slogan)
     await state.set_state(RegStates.ideology)
 
-    await message.answer("Шаг 3/3. Отправьте идеологию партии (до 30 символов).")
+    await message.answer("Шаг 3/5. Отправьте идеологию партии (до 30 символов).")
 
 
 @router.message(RegStates.ideology, F.chat.type == "private")
@@ -687,29 +814,157 @@ async def reg_ideology(
         await message.answer("Идеология не может быть пустой. Попробуйте ещё раз.")
         return
 
+    await state.update_data(ideology=ideology)
+    await state.set_state(RegStates.line)
+
+    await message.answer(
+        "Шаг 4/5. Опишите линию партии (до 600 символов).\n"
+        "Если линия не нужна, отправьте: -"
+    )
+
+
+@router.message(RegStates.line, F.chat.type == "private")
+async def reg_line(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if message.from_user is None:
+        return
+
+    if not message.text:
+        await message.answer("Отправьте линию партии текстом.")
+        return
+
+    line = message.text.strip()
+
+    if line in {"-", "нет", "пропустить", "-"}:
+        line = ""
+    else:
+        line = line[:600]
+
+    await state.update_data(line=line)
+    await state.set_state(RegStates.photo)
+
+    await message.answer(
+        "Шаг 5/5. Отправьте фотографию партии (только одна, необязательно).",
+        reply_markup=_skip_photo_keyboard(),
+    )
+
+
+async def _finish_party_registration(
+    state: FSMContext,
+    session_manager: SessionManager,
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    photo_object: str | None,
+) -> None:
     data = await state.get_data()
     name = data.get("name", "")
     slogan = data.get("slogan", "")
+    ideology = data.get("ideology", "")
+    line = data.get("line", "")
 
     try:
-        party = Party.create(name=name, slogan=slogan, ideology=ideology)
+        party = Party.create(
+            name=name,
+            slogan=slogan,
+            ideology=ideology,
+            line=line,
+            photo_object=photo_object,
+        )
         session = await session_manager.register_party(
-            user_id=message.from_user.id,
+            user_id=user_id,
             party=party,
         )
     except PolIncError as exc:
-        await message.answer(f"Не удалось зарегистрировать партию: {esc(exc)}")
+        await bot.send_message(
+            chat_id=chat_id, text=f"Не удалось зарегистрировать партию: {esc(exc)}"
+        )
         return
 
     await state.clear()
 
     if session is not None:
-        await message.answer(
-            f"Партия «{esc(party.name)}» зарегистрирована в сессии <code>{esc(session.code)}</code>."
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"Партия «{esc(party.name)}» зарегистрирована "
+            f"в сессии <code>{esc(session.code)}</code>.",
         )
         await send_or_update_lobby(bot, session_manager, session)
     else:
-        await message.answer(f"Партия «{esc(party.name)}» зарегистрирована 🫡")
+        await bot.send_message(
+            chat_id=chat_id, text=f"Партия «{esc(party.name)}» зарегистрирована 🫡"
+        )
+
+
+@router.message(RegStates.photo, F.chat.type == "private", F.photo)
+async def reg_photo(
+    message: Message,
+    state: FSMContext,
+    session_manager: SessionManager,
+    party_repo: PartyRepository,
+    bot: Bot,
+) -> None:
+    if message.from_user is None or not message.photo:
+        return
+
+    file_id = message.photo[-1].file_id
+
+    try:
+        tg_file = await bot.get_file(file_id)
+        if not tg_file.file_path:
+            raise PolIncError("Не удалось получить файл фотографии.")
+
+        downloaded = await bot.download_file(tg_file.file_path)
+        if downloaded is None:
+            raise PolIncError("Не удалось скачать фотографию.")
+
+        photo_bytes = downloaded.read()
+        photo_object = await party_repo.save_photo(message.from_user.id, photo_bytes)
+    except PolIncError as exc:
+        await message.answer(f"{esc(exc)} Попробуйте ещё раз или нажмите «Пропустить».")
+        return
+    except Exception:
+        logger.exception("Ошибка при загрузке фото партии")
+        await message.answer(
+            "Не удалось загрузить фотографию. Попробуйте ещё раз или нажмите «Пропустить»."
+        )
+        return
+
+    await _finish_party_registration(
+        state, session_manager, bot, message.chat.id, message.from_user.id, photo_object
+    )
+
+
+@router.callback_query(RegStates.photo, F.data == SKIP_PHOTO_CALLBACK)
+async def reg_skip_photo(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session_manager: SessionManager,
+    bot: Bot,
+) -> None:
+    await callback.answer()
+
+    if callback.from_user is None or callback.message is None:
+        return
+
+    await _finish_party_registration(
+        state,
+        session_manager,
+        bot,
+        callback.message.chat.id,
+        callback.from_user.id,
+        None,
+    )
+
+
+@router.message(RegStates.photo, F.chat.type == "private")
+async def reg_photo_hint(message: Message) -> None:
+    await message.answer(
+        "Отправьте фотографию партии или нажмите «Пропустить».",
+        reply_markup=_skip_photo_keyboard(),
+    )
 
 
 @router.message(Command("startgame"))

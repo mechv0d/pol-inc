@@ -61,6 +61,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         session_manager=session_manager,
         pack_service=pack_service,
+        party_repo=party_repo,
     )
 
     app.state.bot = bot
@@ -76,6 +77,7 @@ async def lifespan(app: FastAPI):
             BotCommand(command="closegame", description="Закрыть игру"),
             BotCommand(command="ss", description="Настройки сессии"),
             BotCommand(command="reg", description="Регистрация партии в ЛС"),
+            BotCommand(command="parties", description="Список партий"),
             BotCommand(command="startgame", description="Запустить игру"),
             BotCommand(command="vote", description="Тайный выбор фракции в ЛС"),
             BotCommand(command="cancel", description="Отменить регистрацию партии"),
