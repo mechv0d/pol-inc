@@ -146,7 +146,7 @@ def format_welcome(session: Session) -> list[str]:
 
 def format_turn(session: Session, pack: GamePack, event: GameEvent) -> list[str]:
     lines = [
-        f"<b>Ход {session.turn_number}/{session.total_turns}.</b> {esc(event.title)}"
+        f"<b>Неделя {session.turn_number}/{session.total_turns}.</b> {esc(event.title)}"
     ]
 
     if event.description:
@@ -175,12 +175,17 @@ def format_turn(session: Session, pack: GamePack, event: GameEvent) -> list[str]
     lines.append("Команда: /vote номер")
     lines.append("Изменить выбор можно не чаще одного раза в минуту.")
 
+    not_voted = [esc(_player_name(player)) for player in session.players.values() if player.vote is None]
+    if not_voted:
+        lines.append("")
+        lines.append(f"❌ Не проголосовали: {', '.join(not_voted)}")
+
     return lines
 
 
 def format_resolution(session: Session, resolution: TurnResolution) -> list[str]:
     lines = [
-        f"<b>Итог хода {resolution.turn_number}.</b>"
+        f"<b>Итог недели {resolution.turn_number}.</b>"
     ]
 
     if resolution.outcome.description:
