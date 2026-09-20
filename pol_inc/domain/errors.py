@@ -60,3 +60,23 @@ class PlayerNotFound(SessionError):
 
 class PartyValidationError(SessionError):
     """Ошибка регистрации партии."""
+
+
+class SessionCannotStart(SessionError):
+    """Сессию нельзя запустить."""
+
+
+class GameNotRunning(SessionError):
+    """Игра сейчас не запущена."""
+
+
+class VoteError(SessionError):
+    """Ошибка голосования."""
+
+
+class VoteChangeCooldown(VoteError):
+    """Голос можно менять не чаще одного раза в минуту."""
+
+
+class PlayerEliminated(SessionError):
+    """Игрок покинул активную игру и не может голосовать вручную."""

@@ -71,6 +71,8 @@ async def lifespan(app: FastAPI):
             BotCommand(command="closegame", description="Закрыть игру"),
             BotCommand(command="ss", description="Настройки сессии"),
             BotCommand(command="reg", description="Регистрация партии в ЛС"),
+            BotCommand(command="startgame", description="Запустить игру"),
+            BotCommand(command="vote", description="Тайный выбор фракции в ЛС"),
         ]
     )
 

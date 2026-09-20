@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from pol_inc.domain.enums import FactionId, SessionStatus
 from pol_inc.domain.errors import (
+    GameNotRunning,
     PackMismatch,
     PartyValidationError,
+    PlayerEliminated,
     PlayerNotFound,
     SessionAlreadyStarted,
+    SessionCannotStart,
     SessionFull,
     UserAlreadyInSession,
+    VoteChangeCooldown,
+    VoteError,
 )
-from pol_inc.domain.packs import GamePack, GamePackMeta
+from pol_inc.domain.packs import (
+    EventOutcome,
+    GameEvent,
+    GamePack,
+    GamePackMeta,
+    ResourceDelta,
+)
+
+_rng = random.SystemRandom()
 
 
 @dataclass(slots=True)
@@ -38,8 +52,25 @@ class Player:
     user_id: int
     username: str | None
     party: Party | None = None
+
+    percent: int = 0
+    influence: int = 0
+
     vote: FactionId | None = None
+    vote_changed_at: datetime | None = None
+
     eliminated: bool = False
+    auto_vote: bool = False
+
+
+@dataclass(slots=True)
+class TurnResolution:
+    event: GameEvent
+    outcome: EventOutcome
+    deltas: dict[int, ResourceDelta]
+    turn_number: int
+    overtime_started: bool = False
+    game_finished: bool = False
 
 
 @dataclass(slots=True)
@@ -56,6 +87,12 @@ class Session:
     min_players: int = 2
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    turn_number: int = 0
+    total_turns: int = 0
+    overtime_used: bool = False
+    turn_plan: list[str] = field(default_factory=list)
+    current_event_id: str | None = None
+
     def add_player(self, user_id: int, username: str | None) -> None:
         if self.status != SessionStatus.NEW:
             raise SessionAlreadyStarted("Сессия уже запущена или закрыта.")
@@ -70,6 +107,24 @@ class Session:
 
     def remove_player(self, user_id: int) -> None:
         self.players.pop(user_id, None)
+
+    def drop_player(self, user_id: int) -> None:
+        player = self.players.get(user_id)
+        if player is None:
+            raise PlayerNotFound("Игрок не найден в сессии.")
+
+        if self.status == SessionStatus.NEW:
+            self.remove_player(user_id)
+            return
+
+        if self.status == SessionStatus.IN_GAME:
+            player.eliminated = True
+            player.auto_vote = True
+            player.vote = None
+            player.vote_changed_at = None
+            return
+
+        raise SessionAlreadyStarted("Нельзя покинуть завершенную или закрытую сессию.")
 
     def set_pack(self, meta: GamePackMeta, pack: GamePack) -> None:
         if self.status != SessionStatus.NEW:
@@ -111,3 +166,176 @@ class Session:
             and len(self.players) >= self.min_players
             and all(player.party is not None for player in self.players.values())
         )
+
+    def start_game(self) -> None:
+        if self.status != SessionStatus.NEW:
+            raise SessionAlreadyStarted("Сессия уже запущена или закрыта.")
+
+        if not self.can_start():
+            raise SessionCannotStart(
+                "Нельзя запустить игру: нужно минимум 2 игрока, выбранный пак "
+                "и зарегистрированные партии всех игроков."
+            )
+
+        if self.pack is None:
+            raise SessionCannotStart("Пак не выбран.")
+
+        self.status = SessionStatus.IN_GAME
+        self.total_turns = self.duration
+        self.turn_plan = self._build_turn_plan(self.pack, self.total_turns)
+        self.turn_number = 1
+        self.current_event_id = self.turn_plan[0]
+
+        for player in self.players.values():
+            player.percent = 0
+            player.influence = 0
+            player.vote = None
+            player.vote_changed_at = None
+            player.eliminated = False
+            player.auto_vote = False
+
+    def get_current_event(self, pack: GamePack) -> GameEvent:
+        if self.current_event_id is None:
+            raise GameNotRunning("Текущий ход не задан.")
+
+        for event in pack.events:
+            if event.id == self.current_event_id:
+                return event
+
+        raise GameNotRunning("Текущее событие не найдено в паке.")
+
+    def register_vote(self, user_id: int, faction_id: FactionId) -> bool:
+        if self.status != SessionStatus.IN_GAME:
+            raise GameNotRunning("Голосование доступно только в запущенной игре.")
+
+        player = self.players.get(user_id)
+        if player is None:
+            raise PlayerNotFound("Игрок не найден в сессии.")
+
+        if player.eliminated or player.auto_vote:
+            raise PlayerEliminated("Вы покинули игру и не можете голосовать вручную.")
+
+        if player.vote == faction_id:
+            return False
+
+        now = datetime.now(timezone.utc)
+
+        if player.vote is not None and player.vote_changed_at is not None:
+            if now - player.vote_changed_at < timedelta(minutes=1):
+                raise VoteChangeCooldown("Изменить голос можно не чаще одного раза в минуту.")
+
+        player.vote = faction_id
+        player.vote_changed_at = now
+        return True
+
+    def ensure_auto_votes(self, pack: GamePack) -> None:
+        if self.status != SessionStatus.IN_GAME:
+            return
+
+        faction_ids = [faction.id for faction in pack.factions]
+        if not faction_ids:
+            faction_ids = list(FactionId)
+
+        for player in self.players.values():
+            if player.auto_vote and player.vote is None:
+                player.vote = _rng.choice(faction_ids)
+
+    def all_votes_ready(self) -> bool:
+        if self.status != SessionStatus.IN_GAME:
+            return False
+
+        if not self.players:
+            return False
+
+        return all(player.vote is not None for player in self.players.values())
+
+    def resolve_turn(self, pack: GamePack) -> TurnResolution:
+        if self.status != SessionStatus.IN_GAME:
+            raise GameNotRunning("Игра сейчас не запущена.")
+
+        if not self.all_votes_ready():
+            raise VoteError("Не все игроки проголосовали.")
+
+        event = self.get_current_event(pack)
+        outcome = _rng.choice(event.outcomes)
+
+        deltas: dict[int, ResourceDelta] = {}
+
+        for player in self.players.values():
+            if player.vote is None:
+                delta = ResourceDelta()
+            else:
+                delta = outcome.effects.get(player.vote, ResourceDelta())
+
+            player.percent = max(0, player.percent + delta.percent)
+            player.influence = max(0, player.influence + delta.influence)
+            deltas[player.user_id] = delta
+
+        resolution = TurnResolution(
+            event=event,
+            outcome=outcome,
+            deltas=deltas,
+            turn_number=self.turn_number,
+        )
+
+        if self.turn_number >= self.total_turns:
+            if not self.overtime_used and self._has_percent_tie_for_first():
+                self.overtime_used = True
+                self.total_turns += 3
+
+                extra_plan = self._build_turn_plan(pack, 3)
+                self.turn_plan.extend(extra_plan)
+
+                self.turn_number += 1
+                self.current_event_id = self.turn_plan[self.turn_number - 1]
+
+                self._reset_votes()
+                self.ensure_auto_votes(pack)
+
+                resolution.overtime_started = True
+            else:
+                self.status = SessionStatus.FINISHED
+                resolution.game_finished = True
+        else:
+            self.turn_number += 1
+            self.current_event_id = self.turn_plan[self.turn_number - 1]
+
+            self._reset_votes()
+            self.ensure_auto_votes(pack)
+
+        return resolution
+
+    def _reset_votes(self) -> None:
+        for player in self.players.values():
+            player.vote = None
+            player.vote_changed_at = None
+
+    def _has_percent_tie_for_first(self) -> bool:
+        if not self.players:
+            return False
+
+        max_percent = max(player.percent for player in self.players.values())
+        top_count = sum(1 for player in self.players.values() if player.percent == max_percent)
+
+        return top_count > 1
+
+    @staticmethod
+    def _build_turn_plan(pack: GamePack, turns: int) -> list[str]:
+        if turns <= 0:
+            raise SessionCannotStart("Количество ходов должно быть больше нуля.")
+
+        event_ids = [event.id for event in pack.events]
+        if not event_ids:
+            raise SessionCannotStart("В паке нет событий.")
+
+        if len(event_ids) >= turns:
+            return _rng.sample(event_ids, turns)
+
+        plan: list[str] = []
+
+        while len(plan) < turns:
+            shuffled = event_ids.copy()
+            _rng.shuffle(shuffled)
+            plan.extend(shuffled)
+
+        return plan[:turns]

@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 from html import escape
 
 from pol_inc.domain.enums import SessionStatus
-from pol_inc.domain.packs import GamePackMeta
-from pol_inc.domain.session import Session
+from pol_inc.domain.packs import GameEvent, GamePack, ResourceDelta
+from pol_inc.domain.session import Player, Session, TurnResolution
 
 STATUS_LABELS = {
     SessionStatus.NEW: "Новая",
@@ -11,15 +13,27 @@ STATUS_LABELS = {
     SessionStatus.CLOSED: "Закрыта",
 }
 
+
 def esc(value: object) -> str:
-    """Экранирует HTML-символы и удаляет потенциально опасные теги."""
-    text = str(value)
-    # Экранируем основные HTML-символы
-    text = escape(text, quote=True)
-    # Дополнительная защита: заменяем оставшиеся < и > на пробелы
-    # (если escape по какой-то причине не сработал)
-    text = text.replace('<', '&lt;').replace('>', '&gt;')
-    return text
+    return escape(str(value))
+
+
+def format_delta(value: int) -> str:
+    if value > 0:
+        return f"+{value}"
+    return str(value)
+
+
+def _party_name(player: Player) -> str:
+    if player.party is None:
+        return "Без партии"
+    return player.party.name
+
+
+def _player_name(player: Player) -> str:
+    if player.username:
+        return f"@{player.username}"
+    return str(player.user_id)
 
 
 def format_session(session: Session) -> list[str]:
@@ -31,25 +45,30 @@ def format_session(session: Session) -> list[str]:
         f"<b>Ходов:</b> {session.duration}",
         f"<b>Игроков:</b> {len(session.players)}/{session.max_players}",
         f"<b>Пак:</b> {pack_name}",
-        "",
-        "<b>Игроки:</b>",
     ]
+
+    if session.status == SessionStatus.IN_GAME:
+        lines.append(f"<b>Текущий ход:</b> {session.turn_number}/{session.total_turns}")
+
+    lines.append("")
+    lines.append("<b>Игроки:</b>")
 
     if not session.players:
         lines.append("- пусто")
         return lines
 
     for player in session.players.values():
-        name = esc(player.username) if player.username else esc(player.user_id)
+        name = esc(_player_name(player))
         prefix = "👑 " if player.user_id == session.creator_id else ""
-        party = f" — {esc(player.party.name)}" if player.party else ""
+        party = f" — {esc(_party_name(player))}" if player.party else ""
+        eliminated = " 🚩" if player.eliminated else ""
 
-        lines.append(f"- {prefix}{name}{party}")
+        lines.append(f"- {prefix}{name}{party}{eliminated}")
 
     return lines
 
 
-def format_pack_list(metas: list[GamePackMeta]) -> list[str]:
+def format_pack_list(metas: list) -> list[str]:
     if not metas:
         return ["Доступных паков пока нет."]
 
@@ -60,6 +79,126 @@ def format_pack_list(metas: list[GamePackMeta]) -> list[str]:
         lines.append(f"- <code>{esc(meta.id)}</code> — {esc(meta.name)}.{description}")
 
     lines.append("")
-    lines.append("Установка: /ss pack id")
+    lines.append("Установка: /ss pack <id>")
+
+    return lines
+
+
+def format_welcome(session: Session) -> list[str]:
+    return [
+        "<b>Игра началась!</b>",
+        "",
+        "Каждый ход бот будет публиковать событие.",
+        "Ваша задача — тайно выбирать фракцию в личных сообщениях бота.",
+        "",
+        "Команда голосования: /vote <номер>",
+        "Изменить голос можно не чаще одного раза в минуту.",
+        "",
+        "Побеждает партия с наибольшим количеством процентов избирателей.",
+    ]
+
+
+def format_turn(session: Session, pack: GamePack, event: GameEvent) -> list[str]:
+    lines = [
+        f"<b>Ход {session.turn_number}/{session.total_turns}.</b> {esc(event.title)}"
+    ]
+
+    if event.description:
+        lines.append("")
+        lines.append(esc(event.description))
+
+    lines.append("")
+    lines.append("<b>Партии:</b>")
+
+    for player in session.players.values():
+        eliminated = " 🚩" if player.eliminated else ""
+        lines.append(
+            f"{esc(_party_name(player))}, {esc(_player_name(player))}{eliminated} "
+            f"— {player.percent}% {player.influence}v"
+        )
+
+    lines.append("")
+    lines.append("<b>Доступные фракции:</b>")
+
+    for index, faction in enumerate(pack.factions, start=1):
+        emoji = faction.emoji or faction.id.emoji
+        lines.append(f"{index}. {emoji} {esc(faction.name)}")
+
+    lines.append("")
+    lines.append("Выбор фракций тайный и проходит только в личных сообщениях бота.")
+    lines.append("Команда: /vote <номер>")
+    lines.append("Изменить выбор можно не чаще одного раза в минуту.")
+
+    return lines
+
+
+def format_resolution(session: Session, resolution: TurnResolution) -> list[str]:
+    lines = [
+        f"<b>Итог хода {resolution.turn_number}.</b>"
+    ]
+
+    if resolution.outcome.description:
+        lines.append("")
+        lines.append(esc(resolution.outcome.description))
+
+    lines.append("")
+    lines.append("<b>Результаты:</b>")
+
+    for player in session.players.values():
+        delta = resolution.deltas.get(player.user_id, ResourceDelta())
+        vote_emoji = player.vote.emoji if player.vote else "❔"
+
+        lines.append(
+            f"{esc(_party_name(player))}, {esc(_player_name(player))} {vote_emoji}: "
+            f"{format_delta(delta.percent)}% {format_delta(delta.influence)}v "
+            f"→ {player.percent}% {player.influence}v"
+        )
+
+    if resolution.overtime_started:
+        lines.append("")
+        lines.append("По итогам основного времени ничья по процентам. Овертайм: +3 хода.")
+
+    return lines
+
+
+def format_final(session: Session) -> list[str]:
+    players = list(session.players.values())
+
+    if not players:
+        return ["Игра завершена."]
+
+    sorted_players = sorted(players, key=lambda player: player.percent, reverse=True)
+    max_percent = sorted_players[0].percent
+    winners = [player for player in sorted_players if player.percent == max_percent]
+
+    lines = ["<b>Игра завершена.</b>", ""]
+
+    if len(winners) == 1:
+        winner = winners[0]
+        lines.append(
+            f"Победитель: {esc(_party_name(winner))}, {esc(_player_name(winner))} "
+            f"— {winner.percent}%"
+        )
+    elif len(winners) == len(sorted_players):
+        lines.append("Все игроки набрали одинаковое количество процентов. Все считаются проигравшими.")
+    else:
+        lines.append("Ничья между:")
+
+        for player in winners:
+            lines.append(
+                f"- {esc(_party_name(player))}, {esc(_player_name(player))} — {player.percent}%"
+            )
+
+        lines.append("Остальные игроки считаются проигравшими.")
+
+    lines.append("")
+    lines.append("<b>Итоговая таблица:</b>")
+
+    for player in sorted_players:
+        eliminated = " 🚩" if player.eliminated else ""
+        lines.append(
+            f"{esc(_party_name(player))}, {esc(_player_name(player))}{eliminated} "
+            f"— {player.percent}% {player.influence}v"
+        )
 
     return lines

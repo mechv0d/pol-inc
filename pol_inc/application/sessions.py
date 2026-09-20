@@ -5,17 +5,20 @@ import secrets
 from dataclasses import dataclass
 
 from pol_inc.config import Settings
-from pol_inc.domain.enums import SessionStatus
+from pol_inc.domain.enums import FactionId, SessionStatus
 from pol_inc.domain.errors import (
     ChatAlreadyHasSession,
+    GameNotRunning,
     NotSessionCreator,
     SessionAttachedToAnotherChat,
+    SessionCannotStart,
     SessionNotFound,
     UserAlreadyInSession,
     UserNotInSession,
+    VoteError,
 )
 from pol_inc.domain.packs import GamePack, GamePackMeta
-from pol_inc.domain.session import Party, Session
+from pol_inc.domain.session import Party, Session, TurnResolution
 
 
 @dataclass(slots=True)
@@ -29,6 +32,9 @@ class LeaveResult:
     code: str
     closed: bool
     closed_by_creator: bool
+    eliminated: bool = False
+    resolution: TurnResolution | None = None
+    session: Session | None = None
 
 
 class SessionManager:
@@ -117,20 +123,74 @@ class SessionManager:
             if code is None:
                 raise UserNotInSession("Вы не участвуете в сессии.")
 
-            session = self._sessions[code]
-            closed_by_creator = user_id == session.creator_id
-            closed = closed_by_creator or len(session.players) <= 1
-
-            if closed:
-                self._close_locked(session)
-            else:
-                session.remove_player(user_id)
+            session = self._sessions.get(code)
+            if session is None:
                 self._user_to_code.pop(user_id, None)
+                raise SessionNotFound("Сессия не найдена.")
+
+            if session.status == SessionStatus.NEW:
+                closed_by_creator = user_id == session.creator_id
+                closed = closed_by_creator or len(session.players) <= 1
+
+                if closed:
+                    self._close_locked(session)
+                else:
+                    session.remove_player(user_id)
+                    self._user_to_code.pop(user_id, None)
+
+                return LeaveResult(
+                    code=code,
+                    closed=closed,
+                    closed_by_creator=closed_by_creator,
+                    eliminated=False,
+                    resolution=None,
+                    session=session,
+                )
+
+            if session.status == SessionStatus.IN_GAME:
+                session.drop_player(user_id)
+                self._user_to_code.pop(user_id, None)
+
+                if all(player.eliminated for player in session.players.values()):
+                    self._close_locked(session)
+                    return LeaveResult(
+                        code=code,
+                        closed=True,
+                        closed_by_creator=False,
+                        eliminated=True,
+                        resolution=None,
+                        session=session,
+                    )
+
+                resolution: TurnResolution | None = None
+
+                if session.pack is not None:
+                    session.ensure_auto_votes(session.pack)
+
+                    if session.all_votes_ready():
+                        resolution = session.resolve_turn(session.pack)
+
+                        if resolution.game_finished:
+                            self._finish_locked(session)
+
+                return LeaveResult(
+                    code=code,
+                    closed=False,
+                    closed_by_creator=False,
+                    eliminated=True,
+                    resolution=resolution,
+                    session=session,
+                )
+
+            self._user_to_code.pop(user_id, None)
 
             return LeaveResult(
                 code=code,
-                closed=closed,
-                closed_by_creator=closed_by_creator,
+                closed=False,
+                closed_by_creator=False,
+                eliminated=False,
+                resolution=None,
+                session=session,
             )
 
     async def close(self, code: str, requester_id: int) -> Session:
@@ -175,6 +235,57 @@ class SessionManager:
             session.register_party(user_id=user_id, party=party)
             return session
 
+    async def start_game(self, chat_id: int, user_id: int) -> Session:
+        async with self._lock:
+            code = self._chat_to_code.get(chat_id)
+            if code is None:
+                raise SessionNotFound("В этом чате нет игровой сессии.")
+
+            session = self._sessions[code]
+
+            if user_id != session.creator_id:
+                raise NotSessionCreator("Запустить игру может только создатель сессии.")
+
+            session.start_game()
+
+            if session.pack is not None:
+                session.ensure_auto_votes(session.pack)
+
+            return session
+
+    async def register_vote(
+        self,
+        user_id: int,
+        choice: str,
+    ) -> tuple[Session, bool, TurnResolution | None]:
+        async with self._lock:
+            code = self._user_to_code.get(user_id)
+            if code is None:
+                raise UserNotInSession("Вы не участвуете в сессии.")
+
+            session = self._sessions[code]
+
+            if session.status != SessionStatus.IN_GAME:
+                raise GameNotRunning("Голосование доступно только в запущенной игре.")
+
+            if session.pack is None:
+                raise SessionCannotStart("В сессии не выбран пак.")
+
+            faction_id = self._parse_faction_choice(session.pack, choice)
+            changed = session.register_vote(user_id=user_id, faction_id=faction_id)
+
+            session.ensure_auto_votes(session.pack)
+
+            resolution: TurnResolution | None = None
+
+            if session.all_votes_ready():
+                resolution = session.resolve_turn(session.pack)
+
+                if resolution.game_finished:
+                    self._finish_locked(session)
+
+            return session, changed, resolution
+
     async def close_expired(self) -> list[Session]:
         async with self._lock:
             expired: list[Session] = []
@@ -199,3 +310,31 @@ class SessionManager:
         self._chat_to_code.pop(session.chat_id, None)
         self._sessions.pop(session.code, None)
         session.status = SessionStatus.CLOSED
+
+    def _finish_locked(self, session: Session) -> None:
+        for user_id in list(session.players.keys()):
+            self._user_to_code.pop(user_id, None)
+
+        self._chat_to_code.pop(session.chat_id, None)
+        self._sessions.pop(session.code, None)
+
+    @staticmethod
+    def _parse_faction_choice(pack: GamePack, choice: str) -> FactionId:
+        raw = choice.strip().lower()
+
+        if not raw:
+            raise VoteError("Укажите номер фракции.")
+
+        if raw.isdigit():
+            index = int(raw) - 1
+
+            if 0 <= index < len(pack.factions):
+                return pack.factions[index].id
+
+            raise VoteError("Номер фракции вне диапазона.")
+
+        for faction in pack.factions:
+            if faction.id.value.lower() == raw or faction.name.lower() == raw:
+                return faction.id
+
+        raise VoteError("Фракция не найдена.")
