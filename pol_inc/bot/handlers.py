@@ -116,14 +116,17 @@ async def send_info_banner(
     url = pack_service.image_url("game_info.jpg")
 
     if not url:
+        await bot.send_message(chat_id=chat_id, text="📢 <b>Текущее событие</b>")
         return None
 
     try:
-        message = await bot.send_photo(chat_id=chat_id, photo=url)
+        message = await bot.send_photo(chat_id=chat_id, photo=url, has_spoiler=True)
         return message.message_id
     except Exception:
         logger.debug("Не удалось отправить game_info.jpg. Возможно, файла нет в бакете.")
+        await bot.send_message(chat_id=chat_id, text="📢 <b>Текущее событие</b>")
         return None
+
 
 async def send_reg_banner(
     bot: Bot,
@@ -133,13 +136,15 @@ async def send_reg_banner(
     url = pack_service.image_url("game_reg.jpg")
 
     if not url:
+        await bot.send_message(chat_id=chat_id, text="📋 <b>Регистрация партии</b>")
         return None
 
     try:
-        message = await bot.send_photo(chat_id=chat_id, photo=url)
+        message = await bot.send_photo(chat_id=chat_id, photo=url, has_spoiler=True)
         return message.message_id
     except Exception:
         logger.debug("Не удалось отправить game_reg.jpg. Возможно, файла нет в бакете.")
+        await bot.send_message(chat_id=chat_id, text="📋 <b>Регистрация партии</b>")
         return None
 
 
@@ -537,6 +542,8 @@ async def reg(
     message: Message,
     session_manager: SessionManager,
     state: FSMContext,
+    pack_service: PackService,
+    bot: Bot,
 ) -> None:
     if message.chat.type in GROUP_TYPES:
         await message.answer("Регистрация партии происходит в личных сообщениях бота.")
@@ -544,6 +551,8 @@ async def reg(
 
     if message.from_user is None:
         return
+
+    await send_reg_banner(bot, message.chat.id, pack_service)
 
     session = session_manager.get_by_user(message.from_user.id)
 
@@ -764,7 +773,14 @@ async def vote(
         return
 
     if changed:
-        await message.answer("Голос принят.")
+        faction_name = ""
+        if command.args.strip().isdigit():
+            idx = int(command.args.strip()) - 1
+            if 0 <= idx < len(session.pack.factions):
+                faction_name = esc(session.pack.factions[idx].name)
+        if not faction_name:
+            faction_name = esc(command.args)
+        await message.answer(f"Голос принят. Вы проголосовали за: {faction_name}.")
     else:
         await message.answer("Ваш голос за эту фракцию уже был учтен.")
 
