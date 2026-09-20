@@ -155,6 +155,7 @@ class Session:
 
     lobby_message_id: int | None = None
     info_banner_message_id: int | None = None
+    turn_message_id: int | None = None
 
     def add_player(
         self,

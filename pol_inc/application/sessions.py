@@ -371,6 +371,16 @@ class SessionManager:
             if session is not None:
                 session.info_banner_message_id = message_id
 
+    async def set_turn_message_id(self, chat_id: int, message_id: int) -> None:
+        async with self._lock:
+            code = self._chat_to_code.get(chat_id)
+            if code is None:
+                return
+
+            session = self._sessions.get(code)
+            if session is not None:
+                session.turn_message_id = message_id
+
     def _generate_code(self) -> str:
         while True:
             code = "".join(secrets.choice(self._alphabet) for _ in range(4))

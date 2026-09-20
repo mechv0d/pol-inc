@@ -52,6 +52,8 @@ class RegStates(StatesGroup):
 
 
 SKIP_PHOTO_CALLBACK = "reg:skip_photo"
+VOTE_CALLBACK_PREFIX = "vote:"
+ABILITIES_CALLBACK = "abilities"
 PARTY_CAPTION_LIMIT = 1024
 
 
@@ -211,6 +213,7 @@ async def send_turn(
     chat_id: int,
     session,
     pack_service: PackService,
+    session_manager: SessionManager,
 ) -> None:
     pack = session.pack
 
@@ -232,7 +235,53 @@ async def send_turn(
         except Exception:
             logger.exception("Не удалось отправить баннер события")
 
-    await send_lines(bot, chat_id, format_turn(session, pack, event))
+    chunks = _chunk_lines(format_turn(session, pack, event))
+
+    if not chunks:
+        return
+
+    first = await bot.send_message(chat_id=chat_id, text=chunks[0])
+    await session_manager.set_turn_message_id(chat_id, first.message_id)
+
+    for chunk in chunks[1:]:
+        await bot.send_message(chat_id=chat_id, text=chunk)
+
+
+async def update_turn_message(bot: Bot, session) -> None:
+    if session.status != SessionStatus.IN_GAME:
+        return
+
+    if not session.turn_message_id:
+        return
+
+    pack = session.pack
+
+    if pack is None:
+        return
+
+    try:
+        event = session.get_current_event(pack)
+    except PolIncError:
+        return
+
+    text = "\n".join(format_turn(session, pack, event))
+
+    if len(text) > 4096:
+        text = text[:4000] + "\n..."
+
+    try:
+        await bot.edit_message_text(
+            chat_id=session.chat_id,
+            message_id=session.turn_message_id,
+            text=text,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc):
+            return
+
+        logger.warning("Не удалось обновить сообщение хода: %s", exc)
+    except Exception:
+        logger.exception("Ошибка при обновлении сообщения хода")
 
 
 async def send_resolution(
@@ -257,7 +306,7 @@ async def send_resolution(
 async def start(message: Message) -> None:
     await message.answer(
         "<b>POL Inc.</b> — политическая игра.\n"
-        "Групповые команды: /newgame, /join, /leavegame, /game, /ss, /startgame\n"
+        "Групповые команды: /newgame, /join, /leavegame, /game, /parties, /ss, /startgame\n"
         "Личные команды: /reg, /vote номер, /cancel"
     )
 
@@ -559,7 +608,9 @@ async def leavegame(
         if result.resolution.game_finished:
             await send_lines(bot, message.chat.id, format_final(result.session))
         else:
-            await send_turn(bot, message.chat.id, result.session, pack_service)
+            await send_turn(
+                bot, message.chat.id, result.session, pack_service, session_manager
+            )
 
 
 @router.message(Command("closegame"))
@@ -921,6 +972,13 @@ async def reg_photo(
             raise PolIncError("Не удалось скачать фотографию.")
 
         photo_bytes = downloaded.read()
+
+        if not photo_bytes.startswith(b"\xff\xd8"):
+            await message.answer(
+                "Пришлите фотографию в формате JPEG или нажмите «Пропустить»."
+            )
+            return
+
         photo_object = await party_repo.save_photo(message.from_user.id, photo_bytes)
     except PolIncError as exc:
         await message.answer(f"{esc(exc)} Попробуйте ещё раз или нажмите «Пропустить».")
@@ -1002,7 +1060,7 @@ async def startgame(
         return
 
     await send_lines(bot, message.chat.id, format_welcome(session))
-    await send_turn(bot, message.chat.id, session, pack_service)
+    await send_turn(bot, message.chat.id, session, pack_service, session_manager)
 
 
 @router.message(Command("vote"))
@@ -1021,32 +1079,119 @@ async def vote(
         return
 
     if not command.args:
-        await message.answer("Использование: /vote номер")
+        await send_vote_keyboard(
+            bot, message.chat.id, session_manager, message.from_user.id
+        )
         return
 
+    await process_vote(
+        bot,
+        session_manager,
+        pack_service,
+        message.chat.id,
+        message.from_user.id,
+        command.args,
+    )
+
+
+def vote_keyboard(session, user_id: int) -> InlineKeyboardMarkup:
+    player = session.players.get(user_id)
+    current = player.vote if player is not None else None
+
+    rows = []
+    for index, faction in enumerate(session.pack.factions, start=1):
+        emoji = faction.emoji or faction.id.emoji
+        mark = " ✅" if current is not None and faction.id == current else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{index}. {emoji} {faction.name}{mark}",
+                    callback_data=f"{VOTE_CALLBACK_PREFIX}{index}",
+                )
+            ]
+        )
+
+    rows.append(
+        [InlineKeyboardButton(text="✨ Способности", callback_data=ABILITIES_CALLBACK)]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_vote_keyboard(
+    bot: Bot,
+    chat_id: int,
+    session_manager: SessionManager,
+    user_id: int,
+) -> None:
+    session = session_manager.get_by_user(user_id)
+
+    if session is None:
+        await bot.send_message(chat_id=chat_id, text="Вы не участвуете в сессии.")
+        return
+
+    if session.status != SessionStatus.IN_GAME or session.pack is None:
+        await bot.send_message(
+            chat_id=chat_id, text="Голосование доступно только в запущенной игре."
+        )
+        return
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Выберите фракцию:",
+        reply_markup=vote_keyboard(session, user_id),
+    )
+
+
+def faction_display_name(session, choice: str) -> str:
+    pack = session.pack
+    raw = choice.strip().lower()
+
+    if pack is not None:
+        if raw.isdigit():
+            index = int(raw) - 1
+            if 0 <= index < len(pack.factions):
+                return pack.factions[index].name
+
+        for faction in pack.factions:
+            if faction.id.value.lower() == raw or faction.name.lower() == raw:
+                return faction.name
+
+    return choice.strip()
+
+
+async def process_vote(
+    bot: Bot,
+    session_manager: SessionManager,
+    pack_service: PackService,
+    chat_id: int,
+    user_id: int,
+    choice: str,
+):
     try:
         session, changed, resolution = await session_manager.register_vote(
-            user_id=message.from_user.id,
-            choice=command.args,
+            user_id=user_id,
+            choice=choice,
         )
     except PolIncError as exc:
-        await message.answer(f"Не удалось проголосовать: {esc(exc)}")
-        return
+        await bot.send_message(
+            chat_id=chat_id, text=f"Не удалось проголосовать: {esc(exc)}"
+        )
+        return None
 
     if changed:
-        faction_name = ""
-        if command.args.strip().isdigit():
-            idx = int(command.args.strip()) - 1
-            if 0 <= idx < len(session.pack.factions):
-                faction_name = esc(session.pack.factions[idx].name)
-        if not faction_name:
-            faction_name = esc(command.args)
-        await message.answer(f"Голос принят. Вы проголосовали за: {faction_name}.")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"Голос принят. Вы проголосовали за: {esc(faction_display_name(session, choice))}.",
+        )
     else:
-        await message.answer("Ваш голос за эту фракцию уже был учтен.")
+        await bot.send_message(
+            chat_id=chat_id, text="Ваш голос за эту фракцию уже был учтен."
+        )
 
     if resolution is None:
-        return
+        await update_turn_message(bot, session)
+        return session
 
     await send_resolution(
         bot,
@@ -1059,4 +1204,61 @@ async def vote(
     if resolution.game_finished:
         await send_lines(bot, session.chat_id, format_final(session))
     else:
-        await send_turn(bot, session.chat_id, session, pack_service)
+        await send_turn(bot, session.chat_id, session, pack_service, session_manager)
+
+    return session
+
+
+@router.callback_query(F.data.startswith(VOTE_CALLBACK_PREFIX))
+async def vote_button(
+    callback: CallbackQuery,
+    session_manager: SessionManager,
+    pack_service: PackService,
+    bot: Bot,
+) -> None:
+    await callback.answer()
+
+    if callback.from_user is None or callback.message is None:
+        return
+
+    if callback.message.chat.type in GROUP_TYPES:
+        await callback.answer(
+            "Голосование проходит только в личных сообщениях бота.", show_alert=True
+        )
+        return
+
+    try:
+        index = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError, AttributeError):
+        return
+
+    session = await process_vote(
+        bot,
+        session_manager,
+        pack_service,
+        callback.message.chat.id,
+        callback.from_user.id,
+        str(index),
+    )
+
+    if session is None:
+        return
+
+    try:
+        fresh = session_manager.get_by_user(callback.from_user.id)
+
+        if (
+            fresh is not None
+            and fresh.status == SessionStatus.IN_GAME
+            and fresh.pack is not None
+        ):
+            await callback.message.edit_reply_markup(
+                reply_markup=vote_keyboard(fresh, callback.from_user.id)
+            )
+    except Exception:
+        logger.debug("Не удалось обновить клавиатуру голосования.")
+
+
+@router.callback_query(F.data == ABILITIES_CALLBACK)
+async def abilities_button(callback: CallbackQuery) -> None:
+    await callback.answer("Способности скоро появятся.")
