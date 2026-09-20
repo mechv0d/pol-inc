@@ -79,6 +79,8 @@ async def send_or_update_lobby(
     bot: Bot,
     session_manager: SessionManager,
     session,
+    *,
+    repost_if_unchanged: bool = False,
 ) -> None:
     if session.status != SessionStatus.NEW:
         return
@@ -98,9 +100,19 @@ async def send_or_update_lobby(
             return
         except TelegramBadRequest as exc:
             if "message is not modified" in str(exc):
-                return
+                if not repost_if_unchanged:
+                    return
 
-            logger.warning("Не удалось отредактировать сообщение лобби: %s", exc)
+                try:
+                    await bot.delete_message(
+                        chat_id=session.chat_id,
+                        message_id=session.lobby_message_id,
+                    )
+                except Exception:
+                    logger.debug("Не удалось удалить старое сообщение лобби.")
+                    return
+            else:
+                logger.warning("Не удалось отредактировать сообщение лобби: %s", exc)
         except Exception:
             logger.exception("Ошибка при редактировании сообщения лобби")
 
@@ -249,7 +261,9 @@ async def game(
                             banner_id,
                         )
 
-                await send_or_update_lobby(bot, session_manager, session)
+                await send_or_update_lobby(
+                    bot, session_manager, session, repost_if_unchanged=True
+                )
             else:
                 await send_lines(bot, message.chat.id, format_session(session))
 
@@ -695,7 +709,7 @@ async def reg_ideology(
         )
         await send_or_update_lobby(bot, session_manager, session)
     else:
-        await message.answer(f"Партия «{esc(party.name)}» зарегистрирована.")
+        await message.answer(f"Партия «{esc(party.name)}» зарегистрирована 🫡")
 
 
 @router.message(Command("startgame"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from dataclasses import dataclass
 
@@ -20,6 +21,8 @@ from pol_inc.domain.errors import (
 from pol_inc.domain.packs import GamePack, GamePackMeta, PartyRecord
 from pol_inc.domain.session import Party, Session, TurnResolution
 from pol_inc.application.parties import PartyRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -100,6 +103,8 @@ class SessionManager:
             self._chat_to_code[chat_id] = code
             self._user_to_code[user_id] = code
 
+            await self._apply_persisted_party_locked(session, user_id)
+
             return session
 
     async def join(
@@ -133,12 +138,7 @@ class SessionManager:
 
             self._user_to_code[user_id] = session.code
 
-            if self._party_repo is not None:
-                record = await self._party_repo.get(user_id)
-                if record is not None:
-                    player = session.players.get(user_id)
-                    if player is not None:
-                        player.party = record.to_party()
+            await self._apply_persisted_party_locked(session, user_id)
 
             return JoinResult(session=session, already_joined=False)
 
@@ -381,6 +381,28 @@ class SessionManager:
             code = "".join(secrets.choice(self._alphabet) for _ in range(4))
             if code not in self._sessions:
                 return code
+
+    async def _apply_persisted_party_locked(self, session: Session, user_id: int) -> None:
+        if self._party_repo is None:
+            return
+
+        try:
+            record = await self._party_repo.get(user_id)
+        except Exception:
+            logger.warning("Не удалось загрузить сохранённую партию user_id=%s", user_id)
+            return
+
+        if record is None:
+            return
+
+        player = session.players.get(user_id)
+        if player is None:
+            return
+
+        try:
+            player.party = record.to_party()
+        except Exception:
+            logger.warning("Сохранённая партия user_id=%s некорректна", user_id)
 
     def _close_locked(self, session: Session) -> None:
         for user_id in list(session.players.keys()):
