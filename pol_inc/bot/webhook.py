@@ -15,9 +15,9 @@ from pol_inc.application.sessions import SessionManager
 from pol_inc.config import get_settings
 from pol_inc.infrastructure.supabase import SupabaseStorageClient
 
-from aiogram.fsm.storage.memory import MemoryStorage
-
 from .dp import create_dispatcher
+
+from aiogram.fsm.storage.memory import MemoryStorage
 
 logger = logging.getLogger(__name__)
 

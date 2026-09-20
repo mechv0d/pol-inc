@@ -4,7 +4,7 @@ import logging
 from html import escape
 
 from aiogram import Dispatcher
-from aiogram.fsm.storage.base import Storage
+from aiogram.fsm.storage.base import BaseStorage
 from aiogram.types import ErrorEvent
 
 from pol_inc.domain.errors import PolIncError
@@ -14,7 +14,7 @@ from .handlers import router as commands_router
 logger = logging.getLogger(__name__)
 
 
-def create_dispatcher(storage: Storage | None = None, **workflow_data) -> Dispatcher:
+def create_dispatcher(storage: BaseStorage | None = None, **workflow_data) -> Dispatcher:
     dp = Dispatcher(storage=storage, **workflow_data)
     dp.include_router(commands_router)
 
