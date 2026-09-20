@@ -133,6 +133,13 @@ class SessionManager:
 
             self._user_to_code[user_id] = session.code
 
+            if self._party_repo is not None:
+                record = await self._party_repo.get(user_id)
+                if record is not None:
+                    player = session.players.get(user_id)
+                    if player is not None:
+                        player.party = record.to_party()
+
             return JoinResult(session=session, already_joined=False)
 
     async def leave(self, user_id: int) -> LeaveResult:
@@ -257,24 +264,26 @@ class SessionManager:
             session.set_duration(turns)
             return session
 
-    async def register_party(self, user_id: int, party: Party) -> Session:
+    async def register_party(self, user_id: int, party: Party) -> Session | None:
+        if self._party_repo is not None:
+            record = PartyRecord(
+                user_id=user_id,
+                name=party.name,
+                slogan=party.slogan,
+                ideology=party.ideology,
+            )
+            await self._party_repo.upsert(record)
+
         async with self._lock:
             code = self._user_to_code.get(user_id)
             if code is None:
-                raise UserNotInSession("Вы не участвуете в сессии.")
+                return None
 
             session = self._sessions[code]
+            if session.status != SessionStatus.NEW:
+                return session
+
             session.register_party(user_id=user_id, party=party)
-
-            if self._party_repo is not None:
-                record = PartyRecord(
-                    user_id=user_id,
-                    name=party.name,
-                    slogan=party.slogan,
-                    ideology=party.ideology,
-                )
-                await self._party_repo.upsert(record)
-
             return session
 
     async def get_persisted_party(self, user_id: int) -> Party | None:

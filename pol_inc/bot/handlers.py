@@ -354,9 +354,14 @@ async def join(
     if result.already_joined:
         await message.answer("Вы уже в этой сессии.")
     else:
-        await message.answer(
-            f"Игрок присоединился к сессии <code>{esc(result.session.code)}</code>."
-        )
+        message_text = f"Игрок присоединился к сессии <code>{esc(result.session.code)}</code>."
+        try:
+            persisted = await session_manager.get_persisted_party(message.from_user.id)
+        except Exception:
+            persisted = None
+        if persisted is not None:
+            message_text += f"\nВаша партия «{esc(persisted.name)}» автоматически применена."
+        await message.answer(message_text)
 
     if result.session.status == SessionStatus.NEW:
         await send_or_update_lobby(bot, session_manager, result.session)
@@ -556,23 +561,17 @@ async def reg(
 
     session = session_manager.get_by_user(message.from_user.id)
 
-    if session is None:
-        await message.answer("Сначала присоединитесь к сессии через /join в групповом чате.")
-        return
-
-    if session.status != SessionStatus.NEW:
-        await message.answer("Регистрировать партию можно только до старта игры.")
-        return
-
-    player = session.players.get(message.from_user.id)
-
     existing_party = None
     try:
         existing_party = await session_manager.get_persisted_party(message.from_user.id)
     except Exception:
         pass
 
-    has_existing = existing_party is not None or (player is not None and player.party is not None)
+    if session is not None and session.status != SessionStatus.NEW:
+        await message.answer("Регистрировать партию можно только до старта игры.")
+        return
+
+    has_existing = existing_party is not None or (session is not None and session.players.get(message.from_user.id) is not None and session.players[message.from_user.id].party is not None)
 
     if has_existing:
         party_name = ""
@@ -609,13 +608,6 @@ async def reg_name(
     if message.from_user is None:
         return
 
-    session = session_manager.get_by_user(message.from_user.id)
-
-    if session is None or session.status != SessionStatus.NEW:
-        await state.clear()
-        await message.answer("Регистрация партии недоступна. Возможно, сессия уже запущена.")
-        return
-
     if not message.text:
         await message.answer("Отправьте название партии текстом.")
         return
@@ -642,13 +634,6 @@ async def reg_slogan(
     session_manager: SessionManager,
 ) -> None:
     if message.from_user is None:
-        return
-
-    session = session_manager.get_by_user(message.from_user.id)
-
-    if session is None or session.status != SessionStatus.NEW:
-        await state.clear()
-        await message.answer("Регистрация партии недоступна. Возможно, сессия уже запущена.")
         return
 
     if not message.text:
@@ -678,13 +663,6 @@ async def reg_ideology(
     if message.from_user is None:
         return
 
-    session = session_manager.get_by_user(message.from_user.id)
-
-    if session is None or session.status != SessionStatus.NEW:
-        await state.clear()
-        await message.answer("Регистрация партии недоступна. Возможно, сессия уже запущена.")
-        return
-
     if not message.text:
         await message.answer("Отправьте идеологию текстом.")
         return
@@ -711,11 +689,13 @@ async def reg_ideology(
 
     await state.clear()
 
-    await message.answer(
-        f"Партия «{esc(party.name)}» зарегистрирована в сессии <code>{esc(session.code)}</code>."
-    )
-
-    await send_or_update_lobby(bot, session_manager, session)
+    if session is not None:
+        await message.answer(
+            f"Партия «{esc(party.name)}» зарегистрирована в сессии <code>{esc(session.code)}</code>."
+        )
+        await send_or_update_lobby(bot, session_manager, session)
+    else:
+        await message.answer(f"Партия «{esc(party.name)}» зарегистрирована.")
 
 
 @router.message(Command("startgame"))
