@@ -62,6 +62,14 @@ class PartyValidationError(SessionError):
     """Ошибка регистрации партии."""
 
 
+class PartyError(SessionError):
+    """Ошибка работы с партией."""
+
+
+class PartyNotFound(PartyError):
+    """Партия не найдена."""
+
+
 class SessionCannotStart(SessionError):
     """Сессию нельзя запустить."""
 
