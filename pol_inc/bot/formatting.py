@@ -11,9 +11,15 @@ STATUS_LABELS = {
     SessionStatus.CLOSED: "Закрыта",
 }
 
-
 def esc(value: object) -> str:
-    return escape(str(value))
+    """Экранирует HTML-символы и удаляет потенциально опасные теги."""
+    text = str(value)
+    # Экранируем основные HTML-символы
+    text = escape(text, quote=True)
+    # Дополнительная защита: заменяем оставшиеся < и > на пробелы
+    # (если escape по какой-то причине не сработал)
+    text = text.replace('<', '&lt;').replace('>', '&gt;')
+    return text
 
 
 def format_session(session: Session) -> list[str]:
