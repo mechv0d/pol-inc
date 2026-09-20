@@ -31,9 +31,7 @@ def _party_name(player: Player) -> str:
 
 
 def _player_name(player: Player) -> str:
-    if player.username:
-        return f"@{player.username}"
-    return str(player.user_id)
+    return player.public_name
 
 
 def format_session(session: Session) -> list[str]:
@@ -58,12 +56,60 @@ def format_session(session: Session) -> list[str]:
         return lines
 
     for player in session.players.values():
-        name = esc(_player_name(player))
         prefix = "👑 " if player.user_id == session.creator_id else ""
         party = f" — {esc(_party_name(player))}" if player.party else ""
         eliminated = " 🚩" if player.eliminated else ""
 
-        lines.append(f"- {prefix}{name}{party}{eliminated}")
+        lines.append(f"- {prefix}{esc(_player_name(player))}{party}{eliminated}")
+
+    return lines
+
+
+def format_lobby(session: Session) -> list[str]:
+    pack_name = esc(session.pack_meta.name) if session.pack_meta else "не выбран"
+    registered = session.registered_parties_count
+    total = len(session.players)
+
+    lines = [
+        "<b>POL Inc. — лобби</b>",
+        f"Код сессии: <code>{esc(session.code)}</code>",
+        f"Статус: {STATUS_LABELS.get(session.status, session.status.value)}",
+        f"Ходов: {session.duration}",
+        f"Пак: {pack_name}",
+        f"Игроков: {total}/{session.max_players}",
+        f"Партий зарегистрировано: {registered}/{total}",
+        "",
+        "<b>Игроки:</b>",
+    ]
+
+    if not session.players:
+        lines.append("- пусто")
+        return lines
+
+    for player in session.players.values():
+        prefix = "👑 " if player.user_id == session.creator_id else ""
+
+        if player.party is not None:
+            icon = "✅"
+            party_text = f" — {esc(player.party.name)}"
+        else:
+            icon = "❌"
+            party_text = " — партия не зарегистрирована"
+
+        lines.append(f"{icon} {prefix}{esc(_player_name(player))}{party_text}")
+
+    lines.append("")
+
+    if session.pack is None:
+        lines.append("❌ Пак не выбран. Создатель может установить его через /ss pack <id>")
+
+    if registered < total:
+        lines.append("❌ Не все партии зарегистрированы.")
+        lines.append(f"Зарегистрировано партий: {registered} из {total}.")
+        lines.append("Каждый игрок должен отправить боту в личные сообщения команду /reg")
+    elif session.pack is not None:
+        lines.append("✅ Все партии зарегистрированы.")
+        lines.append("Создатель может запустить игру: /startgame")
 
     return lines
 

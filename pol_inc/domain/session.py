@@ -51,6 +51,7 @@ class Party:
 class Player:
     user_id: int
     username: str | None
+    display_name: str | None = None
     party: Party | None = None
 
     percent: int = 0
@@ -61,6 +62,16 @@ class Player:
 
     eliminated: bool = False
     auto_vote: bool = False
+
+    @property
+    def public_name(self) -> str:
+        if self.display_name:
+            return self.display_name
+
+        if self.username:
+            return f"@{self.username}"
+
+        return str(self.user_id)
 
 
 @dataclass(slots=True)
@@ -93,7 +104,15 @@ class Session:
     turn_plan: list[str] = field(default_factory=list)
     current_event_id: str | None = None
 
-    def add_player(self, user_id: int, username: str | None) -> None:
+    lobby_message_id: int | None = None
+    info_banner_message_id: int | None = None
+
+    def add_player(
+        self,
+        user_id: int,
+        username: str | None,
+        display_name: str | None = None,
+    ) -> None:
         if self.status != SessionStatus.NEW:
             raise SessionAlreadyStarted("Сессия уже запущена или закрыта.")
 
@@ -103,7 +122,11 @@ class Session:
         if len(self.players) >= self.max_players:
             raise SessionFull("В сессии уже максимальное количество игроков.")
 
-        self.players[user_id] = Player(user_id=user_id, username=username)
+        self.players[user_id] = Player(
+            user_id=user_id,
+            username=username,
+            display_name=display_name,
+        )
 
     def remove_player(self, user_id: int) -> None:
         self.players.pop(user_id, None)
@@ -139,6 +162,21 @@ class Session:
         if pack.durations:
             self.duration = pack.durations[0]
 
+    def set_duration(self, turns: int) -> None:
+        if self.status != SessionStatus.NEW:
+            raise SessionAlreadyStarted("Нельзя менять длительность после старта сессии.")
+
+        if self.pack is None:
+            raise SessionCannotStart("Сначала выберите пак.")
+
+        if turns not in self.pack.durations:
+            available = ", ".join(str(duration) for duration in self.pack.durations)
+            raise SessionCannotStart(
+                f"Длительность {turns} недоступна для этого пака. Доступно: {available}."
+            )
+
+        self.duration = turns
+
     def register_party(self, user_id: int, party: Party) -> None:
         if self.status != SessionStatus.NEW:
             raise SessionAlreadyStarted("Нельзя регистрировать партию после старта сессии.")
@@ -159,23 +197,36 @@ class Session:
         age = datetime.now(timezone.utc) - self.created_at
         return age > timedelta(hours=ttl_hours)
 
+    @property
+    def registered_parties_count(self) -> int:
+        return sum(1 for player in self.players.values() if player.party is not None)
+
     def can_start(self) -> bool:
-        return (
-            self.status == SessionStatus.NEW
-            and self.pack is not None
-            and len(self.players) >= self.min_players
-            and all(player.party is not None for player in self.players.values())
-        )
+        return not self.start_blockers()
+
+    def start_blockers(self) -> list[str]:
+        blockers: list[str] = []
+
+        if self.pack is None:
+            blockers.append("не выбран пак (/ss pack <id>)")
+
+        if len(self.players) < self.min_players:
+            blockers.append(f"нужно минимум {self.min_players} игрока")
+
+        missing = [player for player in self.players.values() if player.party is None]
+        if missing:
+            names = ", ".join(player.public_name for player in missing)
+            blockers.append(f"не зарегистрированы партии: {names}")
+
+        return blockers
 
     def start_game(self) -> None:
         if self.status != SessionStatus.NEW:
             raise SessionAlreadyStarted("Сессия уже запущена или закрыта.")
 
-        if not self.can_start():
-            raise SessionCannotStart(
-                "Нельзя запустить игру: нужно минимум 2 игрока, выбранный пак "
-                "и зарегистрированные партии всех игроков."
-            )
+        blockers = self.start_blockers()
+        if blockers:
+            raise SessionCannotStart("Нельзя запустить игру: " + "; ".join(blockers) + ".")
 
         if self.pack is None:
             raise SessionCannotStart("Пак не выбран.")

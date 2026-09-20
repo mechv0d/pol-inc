@@ -15,6 +15,8 @@ from pol_inc.application.sessions import SessionManager
 from pol_inc.config import get_settings
 from pol_inc.infrastructure.supabase import SupabaseStorageClient
 
+from aiogram.fsm.storage.memory import MemoryStorage
+
 from .dp import create_dispatcher
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ async def lifespan(app: FastAPI):
     )
 
     dp = create_dispatcher(
+        storage=MemoryStorage(),
         settings=settings,
         session_manager=session_manager,
         pack_service=pack_service,
@@ -73,6 +76,7 @@ async def lifespan(app: FastAPI):
             BotCommand(command="reg", description="Регистрация партии в ЛС"),
             BotCommand(command="startgame", description="Запустить игру"),
             BotCommand(command="vote", description="Тайный выбор фракции в ЛС"),
+            BotCommand(command="cancel", description="Отменить регистрацию партии"),
         ]
     )
 

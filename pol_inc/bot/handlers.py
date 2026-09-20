@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
 from pol_inc.application.packs import PackService
 from pol_inc.application.sessions import SessionManager
+from pol_inc.config import Settings
+from pol_inc.domain.enums import SessionStatus
 from pol_inc.domain.errors import PackError, PolIncError
 from pol_inc.domain.session import Party
 
 from .formatting import (
     esc,
     format_final,
+    format_lobby,
     format_pack_list,
     format_resolution,
     format_session,
@@ -27,6 +33,12 @@ router = Router(name="commands")
 
 GROUP_TYPES = {"group", "supergroup"}
 MESSAGE_CHUNK_LIMIT = 4000
+
+
+class RegStates(StatesGroup):
+    name = State()
+    slogan = State()
+    ideology = State()
 
 
 def _chunk_lines(lines: list[str], limit: int = MESSAGE_CHUNK_LIMIT) -> list[str]:
@@ -61,6 +73,81 @@ def _chunk_lines(lines: list[str], limit: int = MESSAGE_CHUNK_LIMIT) -> list[str
 async def send_lines(bot: Bot, chat_id: int, lines: list[str]) -> None:
     for chunk in _chunk_lines(lines):
         await bot.send_message(chat_id=chat_id, text=chunk)
+
+
+async def send_or_update_lobby(
+    bot: Bot,
+    session_manager: SessionManager,
+    session,
+) -> None:
+    if session.status != SessionStatus.NEW:
+        return
+
+    text = "\n".join(format_lobby(session))
+
+    if len(text) > 4096:
+        text = text[:4000] + "\n..."
+
+    if session.lobby_message_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=session.chat_id,
+                message_id=session.lobby_message_id,
+                text=text,
+            )
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc):
+                return
+
+            logger.warning("Не удалось отредактировать сообщение лобби: %s", exc)
+        except Exception:
+            logger.exception("Ошибка при редактировании сообщения лобби")
+
+    message = await bot.send_message(chat_id=session.chat_id, text=text)
+    await session_manager.set_lobby_message_id(session.chat_id, message.message_id)
+
+
+async def send_info_banner(
+    bot: Bot,
+    chat_id: int,
+    pack_service: PackService,
+) -> int | None:
+    url = pack_service.image_url("game_info.jpg")
+
+    if not url:
+        return None
+
+    try:
+        message = await bot.send_photo(chat_id=chat_id, photo=url)
+        return message.message_id
+    except Exception:
+        logger.debug("Не удалось отправить game_info.jpg. Возможно, файла нет в бакете.")
+        return None
+
+
+async def try_set_default_pack(
+    session_manager: SessionManager,
+    pack_service: PackService,
+    settings: Settings,
+    session,
+):
+    if not settings.default_pack_id:
+        return session
+
+    try:
+        meta = await pack_service.get_meta(settings.default_pack_id)
+        pack = await pack_service.load_pack(meta)
+
+        return await session_manager.set_pack(
+            chat_id=session.chat_id,
+            user_id=session.creator_id,
+            meta=meta,
+            pack=pack,
+        )
+    except PolIncError as exc:
+        logger.warning("Не удалось установить пак по умолчанию: %s", exc)
+        return session
 
 
 async def send_turn(
@@ -114,8 +201,8 @@ async def send_resolution(
 async def start(message: Message) -> None:
     await message.answer(
         "<b>POL Inc.</b> — политическая игра.\n"
-        "Групповые команды: /newgame, /join, /leavegame, /game, /ss pack <id>, /startgame\n"
-        "Личные команды: /reg Название | Слоган | Идеология, /vote <номер>"
+        "Групповые команды: /newgame, /join, /leavegame, /game, /ss, /startgame\n"
+        "Личные команды: /reg, /vote <номер>, /cancel"
     )
 
 
@@ -124,7 +211,28 @@ async def game(
     message: Message,
     session_manager: SessionManager,
     pack_service: PackService,
+    bot: Bot,
 ) -> None:
+    if message.chat.type in GROUP_TYPES:
+        session = session_manager.get_by_chat(message.chat.id)
+
+        if session is not None:
+            if session.status == SessionStatus.NEW:
+                if session.info_banner_message_id is None:
+                    banner_id = await send_info_banner(bot, message.chat.id, pack_service)
+
+                    if banner_id is not None:
+                        await session_manager.set_info_banner_message_id(
+                            message.chat.id,
+                            banner_id,
+                        )
+
+                await send_or_update_lobby(bot, session_manager, session)
+            else:
+                await send_lines(bot, message.chat.id, format_session(session))
+
+            return
+
     lines = ["<b>POL Inc.</b>"]
 
     session = None
@@ -151,11 +259,17 @@ async def game(
         lines.append("")
         lines.extend(format_pack_list(metas))
 
-    await send_lines(message.bot, message.chat.id, lines)
+    await send_lines(bot, message.chat.id, lines)
 
 
 @router.message(Command("newgame"))
-async def newgame(message: Message, session_manager: SessionManager) -> None:
+async def newgame(
+    message: Message,
+    session_manager: SessionManager,
+    pack_service: PackService,
+    settings: Settings,
+    bot: Bot,
+) -> None:
     if message.chat.type not in GROUP_TYPES:
         await message.answer("Игра создаётся в групповом чате.")
         return
@@ -168,20 +282,14 @@ async def newgame(message: Message, session_manager: SessionManager) -> None:
             chat_id=message.chat.id,
             user_id=message.from_user.id,
             username=message.from_user.username,
+            display_name=message.from_user.full_name,
         )
     except PolIncError as exc:
         await message.answer(f"Не удалось создать сессию: {esc(exc)}")
         return
 
-    await message.answer(
-        "\n".join(
-            [
-                f"Сессия <code>{esc(session.code)}</code> создана.",
-                "Присоединиться: /join <код>",
-                "Посмотреть состояние: /game",
-            ]
-        )
-    )
+    session = await try_set_default_pack(session_manager, pack_service, settings, session)
+    await send_or_update_lobby(bot, session_manager, session)
 
 
 @router.message(Command("join"))
@@ -189,19 +297,25 @@ async def join(
     message: Message,
     command: CommandObject,
     session_manager: SessionManager,
+    bot: Bot,
 ) -> None:
     if message.chat.type not in GROUP_TYPES:
         await message.answer("Присоединяться к игре нужно в групповом чате.")
         return
 
-    if not command.args:
-        await message.answer("Использование: /join <код>")
-        return
-
     if message.from_user is None:
         return
 
-    code = command.args.strip().upper()
+    if command.args:
+        code = command.args.strip().upper()
+    else:
+        session = session_manager.get_by_chat(message.chat.id)
+
+        if session is None:
+            await message.answer("В этом чате нет сессии. Создать: /newgame")
+            return
+
+        code = session.code
 
     try:
         result = await session_manager.join(
@@ -209,6 +323,7 @@ async def join(
             chat_id=message.chat.id,
             user_id=message.from_user.id,
             username=message.from_user.username,
+            display_name=message.from_user.full_name,
         )
     except PolIncError as exc:
         await message.answer(f"Не удалось присоединиться: {esc(exc)}")
@@ -216,11 +331,13 @@ async def join(
 
     if result.already_joined:
         await message.answer("Вы уже в этой сессии.")
-        return
+    else:
+        await message.answer(
+            f"Игрок присоединился к сессии <code>{esc(result.session.code)}</code>."
+        )
 
-    await message.answer(
-        f"Игрок присоединился к сессии <code>{esc(result.session.code)}</code>."
-    )
+    if result.session.status == SessionStatus.NEW:
+        await send_or_update_lobby(bot, session_manager, result.session)
 
 
 @router.message(Command("leavegame"))
@@ -254,6 +371,13 @@ async def leavegame(
         )
     else:
         await message.answer("Вы покинули сессию.")
+
+    if (
+        result.session is not None
+        and result.session.status == SessionStatus.NEW
+        and not result.closed
+    ):
+        await send_or_update_lobby(bot, session_manager, result.session)
 
     if result.resolution is not None and result.session is not None:
         await send_resolution(
@@ -305,6 +429,7 @@ async def ss(
     command: CommandObject,
     session_manager: SessionManager,
     pack_service: PackService,
+    bot: Bot,
 ) -> None:
     if message.chat.type not in GROUP_TYPES:
         await message.answer("Настройки сессии доступны в групповом чате.")
@@ -313,41 +438,88 @@ async def ss(
     if message.from_user is None:
         return
 
+    session = session_manager.get_by_chat(message.chat.id)
+
+    if session is None:
+        await message.answer("В этом чате нет игровой сессии.")
+        return
+
     if not command.args:
-        await message.answer("Использование: /ss pack <id>")
+        lines = [
+            "<b>Параметры сессии:</b>",
+            "/ss pack <id> — выбрать пак",
+            "/ss turns <число> — выбрать длительность",
+        ]
+
+        if session.pack is not None:
+            available = ", ".join(str(duration) for duration in session.pack.durations)
+            lines.append("")
+            lines.append(f"Доступные длительности: {available}")
+        else:
+            lines.append("")
+            lines.append("Пак пока не выбран. Сначала: /ss pack <id>")
+
+        await send_lines(bot, message.chat.id, lines)
         return
 
     parts = command.args.strip().split()
-
-    if len(parts) < 2 or parts[0].lower() != "pack":
-        await message.answer("Пока поддерживается только: /ss pack <id>")
-        return
-
-    pack_id = parts[1].strip()
+    subcommand = parts[0].lower()
 
     try:
-        meta = await pack_service.get_meta(pack_id)
-        pack = await pack_service.load_pack(meta)
-        session = await session_manager.set_pack(
-            chat_id=message.chat.id,
-            user_id=message.from_user.id,
-            meta=meta,
-            pack=pack,
-        )
+        if subcommand == "pack":
+            if len(parts) < 2:
+                await message.answer("Использование: /ss pack <id>")
+                return
+
+            pack_id = parts[1].strip()
+            meta = await pack_service.get_meta(pack_id)
+            pack = await pack_service.load_pack(meta)
+
+            session = await session_manager.set_pack(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                meta=meta,
+                pack=pack,
+            )
+
+            await message.answer(
+                f"Пак {esc(meta.name)} установлен. Ходов: {session.duration}."
+            )
+
+            await send_or_update_lobby(bot, session_manager, session)
+            return
+
+        if subcommand == "turns":
+            if len(parts) < 2:
+                await message.answer("Использование: /ss turns <число>")
+                return
+
+            if not parts[1].strip().isdigit():
+                await message.answer("Длительность должна быть числом.")
+                return
+
+            turns = int(parts[1].strip())
+
+            session = await session_manager.set_duration(
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                turns=turns,
+            )
+
+            await message.answer(f"Длительность игры установлена: {session.duration} ходов.")
+            await send_or_update_lobby(bot, session_manager, session)
+            return
+
+        await message.answer("Пока поддерживается только: /ss pack <id> и /ss turns <число>")
     except PolIncError as exc:
         await message.answer(f"Не удалось применить настройку: {esc(exc)}")
-        return
-
-    await message.answer(
-        f"Пак {esc(meta.name)} установлен. Ходов: {session.duration}."
-    )
 
 
 @router.message(Command("reg"))
 async def reg(
     message: Message,
-    command: CommandObject,
     session_manager: SessionManager,
+    state: FSMContext,
 ) -> None:
     if message.chat.type in GROUP_TYPES:
         await message.answer("Регистрация партии происходит в личных сообщениях бота.")
@@ -356,20 +528,141 @@ async def reg(
     if message.from_user is None:
         return
 
-    if not command.args:
-        await message.answer("Использование: /reg Название | Слоган | Идеология")
+    session = session_manager.get_by_user(message.from_user.id)
+
+    if session is None:
+        await message.answer("Сначала присоединитесь к сессии через /join в групповом чате.")
         return
 
-    parts = [part.strip() for part in command.args.split("|")]
+    if session.status != SessionStatus.NEW:
+        await message.answer("Регистрировать партию можно только до старта игры.")
+        return
 
-    if len(parts) != 3:
+    player = session.players.get(message.from_user.id)
+
+    if player is not None and player.party is not None:
         await message.answer(
-            "Нужно передать 3 части через '|': /reg Название | Слоган | Идеология"
+            f"У вас уже есть партия «{esc(player.party.name)}». "
+            "Она будет перезаписана.\n\n"
+            "Шаг 1/3. Отправьте название партии (до 30 символов).\n"
+            "Отмена: /cancel"
         )
+    else:
+        await message.answer(
+            "Шаг 1/3. Отправьте название партии (до 30 символов).\n"
+            "Отмена: /cancel"
+        )
+
+    await state.set_state(RegStates.name)
+
+
+@router.message(Command("cancel"), F.chat.type == "private")
+async def cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Регистрация партии отменена.")
+
+
+@router.message(RegStates.name, F.chat.type == "private")
+async def reg_name(
+    message: Message,
+    state: FSMContext,
+    session_manager: SessionManager,
+) -> None:
+    if message.from_user is None:
         return
+
+    session = session_manager.get_by_user(message.from_user.id)
+
+    if session is None or session.status != SessionStatus.NEW:
+        await state.clear()
+        await message.answer("Регистрация партии недоступна. Возможно, сессия уже запущена.")
+        return
+
+    if not message.text:
+        await message.answer("Отправьте название партии текстом.")
+        return
+
+    name = message.text.strip()[:30]
+
+    if not name:
+        await message.answer("Название партии не может быть пустым. Попробуйте ещё раз.")
+        return
+
+    await state.update_data(name=name)
+    await state.set_state(RegStates.slogan)
+
+    await message.answer(
+        "Шаг 2/3. Отправьте слоган партии (до 50 символов).\n"
+        "Если слоган не нужен, отправьте: -"
+    )
+
+
+@router.message(RegStates.slogan, F.chat.type == "private")
+async def reg_slogan(
+    message: Message,
+    state: FSMContext,
+    session_manager: SessionManager,
+) -> None:
+    if message.from_user is None:
+        return
+
+    session = session_manager.get_by_user(message.from_user.id)
+
+    if session is None or session.status != SessionStatus.NEW:
+        await state.clear()
+        await message.answer("Регистрация партии недоступна. Возможно, сессия уже запущена.")
+        return
+
+    if not message.text:
+        await message.answer("Отправьте слоган текстом.")
+        return
+
+    slogan = message.text.strip()
+
+    if slogan in {"-", "нет", "пропустить", "-"}:
+        slogan = ""
+    else:
+        slogan = slogan[:50]
+
+    await state.update_data(slogan=slogan)
+    await state.set_state(RegStates.ideology)
+
+    await message.answer("Шаг 3/3. Отправьте идеологию партии (до 30 символов).")
+
+
+@router.message(RegStates.ideology, F.chat.type == "private")
+async def reg_ideology(
+    message: Message,
+    state: FSMContext,
+    session_manager: SessionManager,
+    bot: Bot,
+) -> None:
+    if message.from_user is None:
+        return
+
+    session = session_manager.get_by_user(message.from_user.id)
+
+    if session is None or session.status != SessionStatus.NEW:
+        await state.clear()
+        await message.answer("Регистрация партии недоступна. Возможно, сессия уже запущена.")
+        return
+
+    if not message.text:
+        await message.answer("Отправьте идеологию текстом.")
+        return
+
+    ideology = message.text.strip()[:30]
+
+    if not ideology:
+        await message.answer("Идеология не может быть пустой. Попробуйте ещё раз.")
+        return
+
+    data = await state.get_data()
+    name = data.get("name", "")
+    slogan = data.get("slogan", "")
 
     try:
-        party = Party.create(name=parts[0], slogan=parts[1], ideology=parts[2])
+        party = Party.create(name=name, slogan=slogan, ideology=ideology)
         session = await session_manager.register_party(
             user_id=message.from_user.id,
             party=party,
@@ -378,9 +671,13 @@ async def reg(
         await message.answer(f"Не удалось зарегистрировать партию: {esc(exc)}")
         return
 
+    await state.clear()
+
     await message.answer(
         f"Партия «{esc(party.name)}» зарегистрирована в сессии <code>{esc(session.code)}</code>."
     )
+
+    await send_or_update_lobby(bot, session_manager, session)
 
 
 @router.message(Command("startgame"))
@@ -397,6 +694,13 @@ async def startgame(
     if message.from_user is None:
         return
 
+    logger.info(
+        "/startgame user_id=%s chat_id=%s username=%s",
+        message.from_user.id,
+        message.chat.id,
+        message.from_user.username,
+    )
+
     try:
         session = await session_manager.start_game(
             chat_id=message.chat.id,
@@ -404,6 +708,10 @@ async def startgame(
         )
     except PolIncError as exc:
         await message.answer(f"Не удалось запустить игру: {esc(exc)}")
+        return
+    except Exception:
+        logger.exception("Ошибка при запуске игры")
+        await message.answer("Внутренняя ошибка при запуске игры. Проверьте логи.")
         return
 
     await send_lines(bot, message.chat.id, format_welcome(session))

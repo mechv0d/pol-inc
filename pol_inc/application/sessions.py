@@ -5,7 +5,7 @@ import secrets
 from dataclasses import dataclass
 
 from pol_inc.config import Settings
-from pol_inc.domain.enums import FactionId, SessionStatus
+from pol_inc.domain.enums import SessionStatus
 from pol_inc.domain.errors import (
     ChatAlreadyHasSession,
     GameNotRunning,
@@ -65,7 +65,13 @@ class SessionManager:
             return None
         return self._sessions.get(code)
 
-    async def create(self, chat_id: int, user_id: int, username: str | None) -> Session:
+    async def create(
+        self,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+        display_name: str | None = None,
+    ) -> Session:
         async with self._lock:
             if chat_id in self._chat_to_code:
                 raise ChatAlreadyHasSession("В этом чате уже есть игровая сессия.")
@@ -82,7 +88,11 @@ class SessionManager:
                 min_players=self._settings.min_players,
             )
 
-            session.add_player(user_id=user_id, username=username)
+            session.add_player(
+                user_id=user_id,
+                username=username,
+                display_name=display_name,
+            )
 
             self._sessions[code] = session
             self._chat_to_code[chat_id] = code
@@ -96,6 +106,7 @@ class SessionManager:
         chat_id: int,
         user_id: int,
         username: str | None,
+        display_name: str | None = None,
     ) -> JoinResult:
         async with self._lock:
             session = self._sessions.get(code.upper())
@@ -112,7 +123,12 @@ class SessionManager:
 
                 raise UserAlreadyInSession("Вы уже участвуете в другой сессии.")
 
-            session.add_player(user_id=user_id, username=username)
+            session.add_player(
+                user_id=user_id,
+                username=username,
+                display_name=display_name,
+            )
+
             self._user_to_code[user_id] = session.code
 
             return JoinResult(session=session, already_joined=False)
@@ -225,6 +241,20 @@ class SessionManager:
             session.set_pack(meta=meta, pack=pack)
             return session
 
+    async def set_duration(self, chat_id: int, user_id: int, turns: int) -> Session:
+        async with self._lock:
+            code = self._chat_to_code.get(chat_id)
+            if code is None:
+                raise SessionNotFound("В этом чате нет игровой сессии.")
+
+            session = self._sessions[code]
+
+            if user_id != session.creator_id:
+                raise NotSessionCreator("Менять параметры сессии может только создатель.")
+
+            session.set_duration(turns)
+            return session
+
     async def register_party(self, user_id: int, party: Party) -> Session:
         async with self._lock:
             code = self._user_to_code.get(user_id)
@@ -297,6 +327,26 @@ class SessionManager:
 
             return expired
 
+    async def set_lobby_message_id(self, chat_id: int, message_id: int) -> None:
+        async with self._lock:
+            code = self._chat_to_code.get(chat_id)
+            if code is None:
+                return
+
+            session = self._sessions.get(code)
+            if session is not None:
+                session.lobby_message_id = message_id
+
+    async def set_info_banner_message_id(self, chat_id: int, message_id: int) -> None:
+        async with self._lock:
+            code = self._chat_to_code.get(chat_id)
+            if code is None:
+                return
+
+            session = self._sessions.get(code)
+            if session is not None:
+                session.info_banner_message_id = message_id
+
     def _generate_code(self) -> str:
         while True:
             code = "".join(secrets.choice(self._alphabet) for _ in range(4))
@@ -319,7 +369,7 @@ class SessionManager:
         self._sessions.pop(session.code, None)
 
     @staticmethod
-    def _parse_faction_choice(pack: GamePack, choice: str) -> FactionId:
+    def _parse_faction_choice(pack: GamePack, choice: str) -> str:
         raw = choice.strip().lower()
 
         if not raw:

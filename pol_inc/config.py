@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 4
     max_players: int = 4
     min_players: int = 2
+    default_pack_id: str = "base"
 
     @field_validator("bot_token", "supabase_service_role_key", "telegram_webhook_secret")
     @classmethod
