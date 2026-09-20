@@ -18,7 +18,6 @@ sys.path.insert(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
 )
 
-from pol_inc.domain.enums import FactionId  # noqa: E402
 from tools.pack_editor.pack_model import (  # noqa: E402
     collect_images,
     load_pack_file,
@@ -26,14 +25,49 @@ from tools.pack_editor.pack_model import (  # noqa: E402
     validate_pack,
 )
 
-KNOWN_FACTION_IDS = [member.value for member in FactionId]
-
 
 def parse_int(value: str, default: int = 0) -> int:
     try:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def enable_russian_shortcuts(root: tk.Tk) -> None:
+    """Ctrl+C/V/X/Z/A не работают на русской раскладке: у клавиш другие keysym.
+
+    Перехватываем <Control-KeyPress> и вручную генерируем стандартные
+    виртуальные события. Латинские сочетания не трогаем (их обрабатывают
+    дефолтные биндинги), чтобы не было двойного срабатывания.
+    """
+    ru_to_virtual = {
+        "Cyrillic_es": "<<Copy>>",
+        "Cyrillic_em": "<<Paste>>",
+        "Cyrillic_che": "<<Cut>>",
+        "Cyrillic_ya": "<<Undo>>",
+        "Cyrillic_ef": "<<SelectAll>>",
+        "с": "<<Copy>>",
+        "м": "<<Paste>>",
+        "ч": "<<Cut>>",
+        "я": "<<Undo>>",
+        "ф": "<<SelectAll>>",
+    }
+
+    def on_ctrl_keypress(event: tk.Event) -> str | None:
+        keysym = event.keysym or ""
+        virtual = ru_to_virtual.get(keysym) or ru_to_virtual.get(keysym.lower())
+
+        if virtual is None:
+            return None
+
+        try:
+            event.widget.event_generate(virtual)
+        except Exception:
+            pass
+
+        return "break"
+
+    root.bind_all("<Control-KeyPress>", on_ctrl_keypress, add="+")
 
 
 class PackEditorApp:
@@ -51,6 +85,7 @@ class PackEditorApp:
         self._build_tabs()
         self._build_statusbar()
 
+        enable_russian_shortcuts(self.root)
         self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
 
     # ---------- каркас ----------
@@ -125,20 +160,19 @@ class PackEditorApp:
 
     def pack_faction_ids(self) -> list[str]:
         if not self.data:
-            return list(KNOWN_FACTION_IDS)
+            return []
 
-        ids = [
+        return [
             faction.get("id")
             for faction in self.data.get("factions", []) or []
             if isinstance(faction, dict) and faction.get("id")
         ]
-        return ids or list(KNOWN_FACTION_IDS)
 
     @staticmethod
-    def entry_row(parent: tk.Widget, label: str) -> ttk.Entry:
+    def entry_row(parent: tk.Widget, label: str, label_width: int = 16) -> ttk.Entry:
         frame = ttk.Frame(parent)
         frame.pack(fill="x", pady=2)
-        ttk.Label(frame, text=label, width=16, anchor="w").pack(side="left")
+        ttk.Label(frame, text=label, width=label_width, anchor="w").pack(side="left")
         entry = ttk.Entry(frame)
         entry.pack(side="left", fill="x", expand=True)
         return entry
@@ -179,7 +213,7 @@ class PackEditorApp:
         self.pack_name_entry = self.entry_row(self.tab_pack, "Название")
         self.pack_desc_text = self.text_block(self.tab_pack, "Описание", height=5)
         self.pack_durations_entry = self.entry_row(
-            self.tab_pack, "Длительности (через ,)"
+            self.tab_pack, "Длительности (через ,)", label_width=24
         )
 
     def load_pack_tab(self) -> None:
@@ -227,9 +261,9 @@ class PackEditorApp:
         right = ttk.Frame(self.tab_factions)
         right.pack(side="left", fill="both", expand=True)
 
-        ttk.Label(right, text="ID", width=16, anchor="w").pack(fill="x")
-        self.faction_id_combo = ttk.Combobox(right, values=KNOWN_FACTION_IDS)
-        self.faction_id_combo.pack(fill="x", pady=2)
+        ttk.Label(right, text="ID (свободный)", width=16, anchor="w").pack(fill="x")
+        self.faction_id_entry = ttk.Entry(right)
+        self.faction_id_entry.pack(fill="x", pady=2)
 
         self.faction_name_entry = self.entry_row(right, "Название")
         self.faction_color_entry = self.entry_row(right, "Цвет")
@@ -269,7 +303,8 @@ class PackEditorApp:
             else {}
         )
 
-        self.faction_id_combo.set(faction.get("id", ""))
+        self.faction_id_entry.delete(0, "end")
+        self.faction_id_entry.insert(0, faction.get("id", ""))
         self.faction_name_entry.delete(0, "end")
         self.faction_name_entry.insert(0, faction.get("name", ""))
         self.faction_color_entry.delete(0, "end")
@@ -288,7 +323,7 @@ class PackEditorApp:
             return
 
         items[self.current_faction] = {
-            "id": self.faction_id_combo.get().strip(),
+            "id": self.faction_id_entry.get().strip(),
             "name": self.faction_name_entry.get().strip(),
             "color": self.faction_color_entry.get().strip(),
             "emoji": self.faction_emoji_entry.get().strip(),
@@ -302,7 +337,7 @@ class PackEditorApp:
 
         self.flush_faction_fields()
         self.faction_items().append(
-            {"id": "army", "name": "Новая фракция", "color": "", "emoji": "", "feature": ""}
+            {"id": "new", "name": "Новая фракция", "color": "", "emoji": "", "feature": ""}
         )
         self.reload_factions_list()
         self.factions_list.selection_clear(0, "end")
@@ -468,10 +503,15 @@ class PackEditorApp:
         ).pack(anchor="w", pady=2)
 
         ttk.Label(right, text="Фракция (пусто — любая)", anchor="w").pack(fill="x")
-        self.ability_faction_combo = ttk.Combobox(right, values=[""] + KNOWN_FACTION_IDS)
+        self.ability_faction_combo = ttk.Combobox(right, values=[""])
         self.ability_faction_combo.pack(fill="x", pady=2)
 
         self.current_ability: int | None = None
+
+    def refresh_ability_faction_values(self) -> None:
+        current = self.ability_faction_combo.get()
+        self.ability_faction_combo["values"] = [""] + self.pack_faction_ids()
+        self.ability_faction_combo.set(current)
 
     def ability_items(self) -> list[dict]:
         if not self.data:
@@ -963,6 +1003,10 @@ class PackEditorApp:
         if current == "Альянсы":
             self.flush_alliance_fields()
             self.refresh_alliance_faction_box()
+        elif current == "Способности":
+            self.flush_ability_fields()
+            self.refresh_ability_faction_values()
+            self.load_ability_fields()
         elif current == "Изображения":
             self.refresh_images()
 
@@ -992,6 +1036,7 @@ class PackEditorApp:
             self.reload_alliances_list()
 
             self.current_ability = None
+            self.refresh_ability_faction_values()
             self.reload_abilities_list()
             self.load_ability_fields()
 
