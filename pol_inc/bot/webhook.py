@@ -116,6 +116,11 @@ async def healthz() -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.head("/healthz")
+async def healthz_head() -> None:
+    return None
+
+
 @app.get("/")
 async def root() -> dict[str, str]:
     return {
