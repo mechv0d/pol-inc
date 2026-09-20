@@ -144,24 +144,67 @@ async def send_or_update_lobby(
     await session_manager.set_lobby_message_id(session.chat_id, message.message_id)
 
 
+async def send_pack_photo(
+    bot: Bot,
+    chat_id: int,
+    pack_service: PackService,
+    object_name: str | None,
+    **kwargs,
+):
+    """Отправляет картинку из бакета пака.
+
+    Сначала пробует прямую отправку по публичной ссылке, а если Telegram
+    не смог скачать файл (приватный бакет и т.п.) — скачивает его сервером
+    через сервисный ключ и перезаливает. Возвращает сообщение или None.
+    Никогда не бросает исключения.
+    """
+    if object_name:
+        url = pack_service.image_url(object_name)
+
+        if url:
+            try:
+                return await bot.send_photo(chat_id=chat_id, photo=url, **kwargs)
+            except Exception:
+                logger.info(
+                    "Прямая отправка %s не удалась, пробую через скачивание.",
+                    object_name,
+                )
+
+        try:
+            data = await pack_service.get_image_bytes(object_name)
+        except Exception:
+            logger.exception("Не удалось скачать %s из Supabase", object_name)
+            return None
+
+        if data:
+            try:
+                filename = object_name.rsplit("/", 1)[-1] or "image.jpg"
+                return await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=BufferedInputFile(data, filename=filename),
+                    **kwargs,
+                )
+            except Exception:
+                logger.exception("Не удалось отправить %s в Telegram", object_name)
+                return None
+
+    return None
+
+
 async def send_info_banner(
     bot: Bot,
     chat_id: int,
     pack_service: PackService,
 ) -> int | None:
-    url = pack_service.image_url("game_info.jpg")
+    message = await send_pack_photo(
+        bot, chat_id, pack_service, "game_info.jpg", has_spoiler=True
+    )
 
-    if not url:
-        await bot.send_message(chat_id=chat_id, text="📢 <b>Текущее событие</b>")
-        return None
-
-    try:
-        message = await bot.send_photo(chat_id=chat_id, photo=url, has_spoiler=True)
+    if message is not None:
         return message.message_id
-    except Exception:
-        logger.debug("Не удалось отправить game_info.jpg. Возможно, файла нет в бакете.")
-        await bot.send_message(chat_id=chat_id, text="📢 <b>Текущее событие</b>")
-        return None
+
+    await bot.send_message(chat_id=chat_id, text="📢 <b>Текущее событие</b>")
+    return None
 
 
 async def send_reg_banner(
@@ -169,19 +212,15 @@ async def send_reg_banner(
     chat_id: int,
     pack_service: PackService,
 ) -> int | None:
-    url = pack_service.image_url("game_reg.jpg")
+    message = await send_pack_photo(
+        bot, chat_id, pack_service, "game_reg.jpg", has_spoiler=True
+    )
 
-    if not url:
-        await bot.send_message(chat_id=chat_id, text="📋 <b>Регистрация партии</b>")
-        return None
-
-    try:
-        message = await bot.send_photo(chat_id=chat_id, photo=url, has_spoiler=True)
+    if message is not None:
         return message.message_id
-    except Exception:
-        logger.debug("Не удалось отправить game_reg.jpg. Возможно, файла нет в бакете.")
-        await bot.send_message(chat_id=chat_id, text="📋 <b>Регистрация партии</b>")
-        return None
+
+    await bot.send_message(chat_id=chat_id, text="📋 <b>Регистрация партии</b>")
+    return None
 
 
 async def try_set_default_pack(
@@ -227,13 +266,7 @@ async def send_turn(
         await bot.send_message(chat_id=chat_id, text=f"Не удалось получить событие: {esc(exc)}")
         return
 
-    banner_url = pack_service.image_url(event.banner)
-
-    if banner_url:
-        try:
-            await bot.send_photo(chat_id=chat_id, photo=banner_url)
-        except Exception:
-            logger.exception("Не удалось отправить баннер события")
+    await send_pack_photo(bot, chat_id, pack_service, event.banner)
 
     chunks = _chunk_lines(format_turn(session, pack, event))
 
@@ -291,13 +324,7 @@ async def send_resolution(
     resolution,
     pack_service: PackService,
 ) -> None:
-    banner_url = pack_service.image_url(resolution.outcome.banner)
-
-    if banner_url:
-        try:
-            await bot.send_photo(chat_id=chat_id, photo=banner_url)
-        except Exception:
-            logger.exception("Не удалось отправить баннер исхода")
+    await send_pack_photo(bot, chat_id, pack_service, resolution.outcome.banner)
 
     await send_lines(bot, chat_id, format_resolution(session, resolution))
 

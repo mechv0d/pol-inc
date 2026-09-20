@@ -55,3 +55,16 @@ class PackService:
 
     def image_url(self, object_name: str | None) -> str | None:
         return self._storage.public_url(self._settings.images_bucket, object_name)
+
+    async def get_image_bytes(self, object_name: str | None) -> bytes | None:
+        if not object_name:
+            return None
+
+        try:
+            return await self._storage.download_bytes(
+                self._settings.images_bucket, object_name
+            )
+        except PackNotFound:
+            return None
+        except PackLoadError:
+            return None
