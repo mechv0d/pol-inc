@@ -208,7 +208,7 @@ class Session:
         blockers: list[str] = []
 
         if self.pack is None:
-            blockers.append("не выбран пак (/ss pack <id>)")
+            blockers.append("не выбран пак (/ss pack id)")
 
         if len(self.players) < self.min_players:
             blockers.append(f"нужно минимум {self.min_players} игрока")

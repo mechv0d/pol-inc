@@ -411,7 +411,7 @@ async def closegame(
             code = session.code
 
     if not code:
-        await message.answer("Использование: /closegame <код>")
+        await message.answer("Использование: /closegame код")
         return
 
     try:
@@ -447,7 +447,7 @@ async def ss(
     if not command.args:
         lines = [
             "<b>Параметры сессии:</b>",
-            "/ss pack <id> — выбрать пак",
+            "/ss pack id — выбрать пак",
             "/ss turns <число> — выбрать длительность",
         ]
 
@@ -457,7 +457,7 @@ async def ss(
             lines.append(f"Доступные длительности: {available}")
         else:
             lines.append("")
-            lines.append("Пак пока не выбран. Сначала: /ss pack <id>")
+            lines.append("Пак пока не выбран. Сначала: /ss pack id")
 
         await send_lines(bot, message.chat.id, lines)
         return
@@ -468,7 +468,7 @@ async def ss(
     try:
         if subcommand == "pack":
             if len(parts) < 2:
-                await message.answer("Использование: /ss pack <id>")
+                await message.answer("Использование: /ss pack id")
                 return
 
             pack_id = parts[1].strip()
@@ -510,7 +510,7 @@ async def ss(
             await send_or_update_lobby(bot, session_manager, session)
             return
 
-        await message.answer("Пока поддерживается только: /ss pack <id> и /ss turns <число>")
+        await message.answer("Пока поддерживается только: /ss pack id и /ss turns <число>")
     except PolIncError as exc:
         await message.answer(f"Не удалось применить настройку: {esc(exc)}")
 

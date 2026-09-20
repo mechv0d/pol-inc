@@ -101,7 +101,7 @@ def format_lobby(session: Session) -> list[str]:
     lines.append("")
 
     if session.pack is None:
-        lines.append("❌ Пак не выбран. Создатель может установить его через /ss pack <id>")
+        lines.append("❌ Пак не выбран. Создатель может установить его через /ss pack id")
 
     if registered < total:
         lines.append("❌ Не все партии зарегистрированы.")
@@ -125,7 +125,7 @@ def format_pack_list(metas: list) -> list[str]:
         lines.append(f"- <code>{esc(meta.id)}</code> — {esc(meta.name)}.{description}")
 
     lines.append("")
-    lines.append("Установка: /ss pack <id>")
+    lines.append("Установка: /ss pack id")
 
     return lines
 
@@ -172,7 +172,7 @@ def format_turn(session: Session, pack: GamePack, event: GameEvent) -> list[str]
 
     lines.append("")
     lines.append("Выбор фракций тайный и проходит только в личных сообщениях бота.")
-    lines.append("Команда: /vote <номер>")
+    lines.append("Команда: /vote номер")
     lines.append("Изменить выбор можно не чаще одного раза в минуту.")
 
     return lines
