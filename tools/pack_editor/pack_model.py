@@ -14,6 +14,53 @@ from pydantic import ValidationError
 GLOBAL_BANNERS = ["game_info.jpg", "game_reg.jpg"]
 
 
+def new_pack_template() -> dict:
+    """Минимальный валидный пак-заготовка для написания с нуля."""
+    return {
+        "id": "new_pack",
+        "name": "Новый пак",
+        "description": "",
+        "durations": [8],
+        "factions": [
+            {
+                "id": "faction_1",
+                "name": "Фракция 1",
+                "color": "",
+                "emoji": "",
+                "feature": "",
+            },
+            {
+                "id": "faction_2",
+                "name": "Фракция 2",
+                "color": "",
+                "emoji": "",
+                "feature": "",
+            },
+        ],
+        "alliances": [],
+        "abilities": [],
+        "events": [
+            {
+                "id": "event_1",
+                "title": "Новое событие",
+                "description": "",
+                "banner": None,
+                "outcomes": [
+                    {
+                        "id": "outcome_1",
+                        "description": "",
+                        "banner": None,
+                        "effects": {
+                            "faction_1": {"percent": 0, "influence": 0},
+                            "faction_2": {"percent": 0, "influence": 0},
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def load_pack_file(path: str | Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)

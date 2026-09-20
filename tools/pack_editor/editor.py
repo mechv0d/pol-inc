@@ -21,6 +21,7 @@ sys.path.insert(
 from tools.pack_editor.pack_model import (  # noqa: E402
     collect_images,
     load_pack_file,
+    new_pack_template,
     save_pack_file,
     validate_pack,
 )
@@ -94,6 +95,7 @@ class PackEditorApp:
         menubar = tk.Menu(self.root)
 
         file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Новый пак", command=self.on_new, accelerator="Ctrl+N")
         file_menu.add_command(label="Открыть...", command=self.on_open, accelerator="Ctrl+O")
         file_menu.add_command(label="Сохранить", command=self.on_save, accelerator="Ctrl+S")
         file_menu.add_command(label="Сохранить как...", command=self.on_save_as)
@@ -106,6 +108,7 @@ class PackEditorApp:
         menubar.add_cascade(label="Пак", menu=pack_menu)
 
         self.root.config(menu=menubar)
+        self.root.bind("<Control-n>", lambda _event: self.on_new())
         self.root.bind("<Control-o>", lambda _event: self.on_open())
         self.root.bind("<Control-s>", lambda _event: self.on_save())
 
@@ -261,7 +264,7 @@ class PackEditorApp:
         right = ttk.Frame(self.tab_factions)
         right.pack(side="left", fill="both", expand=True)
 
-        ttk.Label(right, text="ID (свободный)", width=16, anchor="w").pack(fill="x")
+        ttk.Label(right, text="ID", width=16, anchor="w").pack(fill="x")
         self.faction_id_entry = ttk.Entry(right)
         self.faction_id_entry.pack(fill="x", pady=2)
 
@@ -1056,6 +1059,17 @@ class PackEditorApp:
             "Несохранённые изменения",
             "Есть несохранённые изменения. Продолжить без сохранения?",
         )
+
+    def on_new(self) -> None:
+        if not self.confirm_discard():
+            return
+
+        self.data = new_pack_template()
+        self.path = None
+        self.dirty = True
+        self._refresh_title()
+        self.reload_all()
+        self.set_status("Новый пак. Заполните вкладки и сохраните через Файл → Сохранить.")
 
     def on_open(self) -> None:
         if not self.confirm_discard():
