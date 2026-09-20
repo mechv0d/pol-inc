@@ -87,7 +87,7 @@ async def newgame(message: Message, session_manager: SessionManager) -> None:
         "\n".join(
             [
                 f"Сессия <code>{esc(session.code)}</code> создана.",
-                "Присоединиться: /join <код>",
+                "Присоединиться: /join код",
                 "Посмотреть состояние: /game",
             ]
         )
@@ -105,7 +105,7 @@ async def join(
         return
 
     if not command.args:
-        await message.answer("Использование: /join <код>")
+        await message.answer("Использование: /join код")
         return
 
     if message.from_user is None:
@@ -174,7 +174,7 @@ async def closegame(
             code = session.code
 
     if not code:
-        await message.answer("Использование: /closegame <код>")
+        await message.answer("Использование: /closegame код")
         return
 
     try:
