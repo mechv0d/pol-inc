@@ -36,17 +36,33 @@ class Party:
     name: str
     slogan: str
     ideology: str
+    line: str = ""
+    photo_object: str | None = None
 
     @classmethod
-    def create(cls, name: str, slogan: str, ideology: str) -> "Party":
+    def create(
+        cls,
+        name: str,
+        slogan: str,
+        ideology: str,
+        line: str = "",
+        photo_object: str | None = None,
+    ) -> "Party":
         name = name.strip()[:30]
         slogan = slogan.strip()[:50]
         ideology = ideology.strip()[:30]
+        line = line.strip()[:600]
 
         if not name or not ideology:
             raise PartyValidationError("Название и идеология партии не могут быть пустыми.")
 
-        return cls(name=name, slogan=slogan, ideology=ideology)
+        return cls(
+            name=name,
+            slogan=slogan,
+            ideology=ideology,
+            line=line,
+            photo_object=photo_object,
+        )
 
 
 class PartyRecord(BaseModel):
@@ -56,9 +72,28 @@ class PartyRecord(BaseModel):
     name: str
     slogan: str = ""
     ideology: str
+    line: str = ""
+    photo_object: str | None = None
 
     def to_party(self) -> Party:
-        return Party.create(name=self.name, slogan=self.slogan, ideology=self.ideology)
+        return Party.create(
+            name=self.name,
+            slogan=self.slogan,
+            ideology=self.ideology,
+            line=self.line,
+            photo_object=self.photo_object,
+        )
+
+    @classmethod
+    def from_party(cls, user_id: int, party: Party) -> "PartyRecord":
+        return cls(
+            user_id=user_id,
+            name=party.name,
+            slogan=party.slogan,
+            ideology=party.ideology,
+            line=party.line,
+            photo_object=party.photo_object,
+        )
 
 
 @dataclass(slots=True)

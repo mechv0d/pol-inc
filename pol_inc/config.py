@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     packs_index_object: str = "index.json"
     images_bucket: str = "pack-images"
     party_bucket: str = "parties"
+    party_images_bucket: str = "party-images"
 
     session_ttl_hours: int = 4
     max_players: int = 4

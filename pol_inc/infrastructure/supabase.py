@@ -155,6 +155,95 @@ class SupabaseStorageClient:
                 f"Supabase Storage вернул статус {response.status_code}: {detail}"
             )
 
+    async def upload_bytes(
+        self,
+        bucket: str,
+        object_name: str,
+        data: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        object_name = object_name.lstrip("/")
+
+        if not object_name:
+            raise PackLoadError("Имя объекта в Supabase Storage не указано.")
+
+        if not data:
+            raise PackLoadError("Пустой файл нельзя загрузить в Supabase Storage.")
+
+        await self.ensure_bucket(bucket)
+
+        path = f"/storage/v1/object/{quote(bucket, safe='')}/{quote(object_name, safe='/')}"
+
+        try:
+            response = await self._client.post(
+                path,
+                content=data,
+                headers={
+                    "Content-Type": content_type,
+                    "x-upsert": "true",
+                    **self._headers,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise PackLoadError("Не удалось загрузить файл в Supabase Storage.") from exc
+
+        if response.status_code >= 400:
+            detail = _response_detail(response)
+            logger.warning(
+                "Supabase Storage POST %s вернул статус %s: %s",
+                path,
+                response.status_code,
+                detail,
+            )
+            raise PackLoadError(
+                f"Supabase Storage вернул статус {response.status_code}: {detail}"
+            )
+
+    async def download_bytes(self, bucket: str, object_name: str) -> bytes:
+        object_name = object_name.lstrip("/")
+
+        if not object_name:
+            raise PackLoadError("Имя объекта в Supabase Storage не указано.")
+
+        path = f"/storage/v1/object/{quote(bucket, safe='')}/{quote(object_name, safe='/')}"
+
+        try:
+            response = await self._client.get(path)
+        except httpx.HTTPError as exc:
+            raise PackLoadError("Не удалось скачать файл из Supabase Storage.") from exc
+
+        if response.status_code == 404:
+            raise PackNotFound(f"Объект {object_name} не найден в бакете {bucket}.")
+
+        if response.status_code >= 400:
+            detail = _response_detail(response)
+            logger.warning(
+                "Supabase Storage GET %s вернул статус %s: %s",
+                path,
+                response.status_code,
+                detail,
+            )
+            raise PackLoadError(
+                f"Supabase Storage вернул статус {response.status_code}: {detail}"
+            )
+
+        return response.content
+
+    async def upload_party_photo(self, user_id: int, data: bytes) -> str:
+        object_name = f"{user_id}.jpg"
+        await self.upload_bytes(
+            self._settings.party_images_bucket,
+            object_name,
+            data,
+            content_type="image/jpeg",
+        )
+        return object_name
+
+    async def download_party_photo(self, object_name: str) -> bytes:
+        return await self.download_bytes(
+            self._settings.party_images_bucket, object_name
+        )
+
     async def get_party(self, user_id: int) -> dict | None:
         bucket = self._settings.party_bucket
         await self.ensure_bucket(bucket)

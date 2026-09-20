@@ -266,12 +266,7 @@ class SessionManager:
 
     async def register_party(self, user_id: int, party: Party) -> Session | None:
         if self._party_repo is not None:
-            record = PartyRecord(
-                user_id=user_id,
-                name=party.name,
-                slogan=party.slogan,
-                ideology=party.ideology,
-            )
+            record = PartyRecord.from_party(user_id=user_id, party=party)
             await self._party_repo.upsert(record)
 
         async with self._lock:
