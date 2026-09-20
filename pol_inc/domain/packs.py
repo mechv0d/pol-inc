@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from pol_inc.domain.enums import FactionId
-
 
 class ResourceDelta(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -27,13 +25,13 @@ class Ability(BaseModel):
     description: str = ""
     cost: AbilityCost = Field(default_factory=AbilityCost)
     targeted: bool = False
-    faction: FactionId | None = None
+    faction: str | None = None
 
 
 class FactionInfo(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    id: FactionId
+    id: str
     name: str
     color: str = ""
     emoji: str = ""
@@ -45,7 +43,7 @@ class Alliance(BaseModel):
 
     id: str
     name: str
-    factions: list[FactionId]
+    factions: list[str]
 
 
 class EventOutcome(BaseModel):
@@ -54,7 +52,7 @@ class EventOutcome(BaseModel):
     id: str
     description: str = ""
     banner: str | None = None
-    effects: dict[FactionId, ResourceDelta] = Field(default_factory=dict)
+    effects: dict[str, ResourceDelta] = Field(default_factory=dict)
 
 
 class GameEvent(BaseModel):

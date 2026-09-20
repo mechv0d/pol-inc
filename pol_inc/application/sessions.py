@@ -444,7 +444,7 @@ class SessionManager:
             raise VoteError("Номер фракции вне диапазона.")
 
         for faction in pack.factions:
-            if faction.id.value.lower() == raw or faction.name.lower() == raw:
+            if faction.id.lower() == raw or faction.name.lower() == raw:
                 return faction.id
 
         raise VoteError("Фракция не найдена.")

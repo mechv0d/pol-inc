@@ -1100,12 +1100,11 @@ def vote_keyboard(session, user_id: int) -> InlineKeyboardMarkup:
 
     rows = []
     for index, faction in enumerate(session.pack.factions, start=1):
-        emoji = faction.emoji or faction.id.emoji
         mark = " ✅" if current is not None and faction.id == current else ""
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{index}. {emoji} {faction.name}{mark}",
+                    text=f"{index}. {faction.name}{mark}",
                     callback_data=f"{VOTE_CALLBACK_PREFIX}{index}",
                 )
             ]
@@ -1154,7 +1153,7 @@ def faction_display_name(session, choice: str) -> str:
                 return pack.factions[index].name
 
         for faction in pack.factions:
-            if faction.id.value.lower() == raw or faction.name.lower() == raw:
+            if faction.id.lower() == raw or faction.name.lower() == raw:
                 return faction.name
 
     return choice.strip()

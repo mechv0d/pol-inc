@@ -34,6 +34,18 @@ def _player_name(player: Player) -> str:
     return player.public_name
 
 
+def _faction_name(session: Session, faction_id: str | None) -> str:
+    if not faction_id:
+        return "❔"
+
+    if session.pack is not None:
+        for faction in session.pack.factions:
+            if faction.id == faction_id:
+                return faction.name
+
+    return faction_id
+
+
 def format_session(session: Session) -> list[str]:
     pack_name = esc(session.pack_meta.name) if session.pack_meta else "не выбран"
 
@@ -168,8 +180,7 @@ def format_turn(session: Session, pack: GamePack, event: GameEvent) -> list[str]
     lines.append("<b>Доступные фракции:</b>")
 
     for index, faction in enumerate(pack.factions, start=1):
-        emoji = faction.emoji or faction.id.emoji
-        lines.append(f"{index}. {emoji} {esc(faction.name)}")
+        lines.append(f"{index}. {esc(faction.name)}")
 
     lines.append("")
     lines.append("Выбор фракций тайный и проходит только в личных сообщениях бота.")
@@ -198,10 +209,10 @@ def format_resolution(session: Session, resolution: TurnResolution) -> list[str]
 
     for player in session.players.values():
         delta = resolution.deltas.get(player.user_id, ResourceDelta())
-        vote_emoji = player.vote.emoji if player.vote else "❔"
+        vote_label = _faction_name(session, player.vote)
 
         lines.append(
-            f"{esc(_party_name(player))}, {esc(_player_name(player))} {vote_emoji}: "
+            f"{esc(_party_name(player))}, {esc(_player_name(player))} {esc(vote_label)}: "
             f"{format_delta(delta.percent)}% {format_delta(delta.influence)}v "
             f"→ {player.percent}% {player.influence}v"
         )

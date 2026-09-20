@@ -1,0 +1,151 @@
+{
+  "id": "base",
+  "name": "Базовый набор",
+  "description": "Стартовый набор событий и фракций",
+  "durations": [
+    8,
+    10,
+    12
+  ],
+  "factions": [
+    {
+      "id": "army",
+      "name": "🔴 Армия",
+      "color": "red",
+      "emoji": "🔴",
+      "feature": "Силовая фракция."
+    },
+    {
+      "id": "people",
+      "name": "🟢 Народ",
+      "color": "green",
+      "emoji": "🟢",
+      "feature": "Народная поддержка."
+    },
+    {
+      "id": "business",
+      "name": "🟡 Бизнес",
+      "color": "yellow",
+      "emoji": "🟡",
+      "feature": "Экономическое влияние."
+    },
+    {
+      "id": "west",
+      "name": "🔵 Запад",
+      "color": "blue",
+      "emoji": "🔵",
+      "feature": "Внешняя поддержка."
+    },
+    {
+      "id": "populism",
+      "name": "🔘 Популизм",
+      "color": "gray",
+      "emoji": "🔘",
+      "feature": "Без особенностей, но почти всегда безопасен."
+    }
+  ],
+  "alliances": [
+    {
+      "id": "army_people",
+      "name": "Армия и Народ",
+      "factions": [
+        "army",
+        "people"
+      ]
+    },
+    {
+      "id": "business_west",
+      "name": "Бизнес и Запад",
+      "factions": [
+        "business",
+        "west"
+      ]
+    }
+  ],
+  "abilities": [
+    {
+      "id": "agitation",
+      "name": "Агитация",
+      "description": "Если выбранная фракция оказалась фаворитом, вы получаете х2 процентов. Если нет — всё равно получаете 1%.",
+      "cost": {
+        "influence": 1,
+        "percent": 0
+      },
+      "targeted": false
+    },
+    {
+      "id": "espionage",
+      "name": "Шпионаж",
+      "description": "Позволяет украсть весь профит за этот ход у определённого игрока.",
+      "cost": {
+        "influence": 1,
+        "percent": 0
+      },
+      "targeted": true
+    }
+  ],
+  "events": [
+    {
+      "id": "border_crisis",
+      "title": "Обострение на границе",
+      "description": "Группа радикалов пыталась провезти взрывчатые вещества через границу. Их обнаружили, но радикалы отказались сдаваться и ответили огнём.",
+      "banner": "border_crisis.jpg",
+      "outcomes": [
+        {
+          "id": "radicals_found",
+          "description": "Радикалов нашли.",
+          "banner": "border_crisis_found.jpg",
+          "effects": {
+            "army": {
+              "percent": 1,
+              "influence": 1
+            },
+            "people": {
+              "percent": 0,
+              "influence": 1
+            },
+            "business": {
+              "percent": 0,
+              "influence": 0
+            },
+            "west": {
+              "percent": -1,
+              "influence": 1
+            },
+            "populism": {
+              "percent": 0,
+              "influence": 0
+            }
+          }
+        },
+        {
+          "id": "radicals_escaped",
+          "description": "Радикалы смогли скрыться в горной местности.",
+          "banner": "border_crisis_escaped.jpg",
+          "effects": {
+            "army": {
+              "percent": -1,
+              "influence": 0
+            },
+            "people": {
+              "percent": 1,
+              "influence": 0
+            },
+            "business": {
+              "percent": 0,
+              "influence": 1
+            },
+            "west": {
+              "percent": 1,
+              "influence": 1
+            },
+            "populism": {
+              "percent": 0,
+              "influence": 0
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

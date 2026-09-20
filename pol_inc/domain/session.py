@@ -106,7 +106,7 @@ class Player:
     percent: int = 0
     influence: int = 0
 
-    vote: FactionId | None = None
+    vote: str | None = None
     vote_changed_at: datetime | None = None
 
     eliminated: bool = False
@@ -305,7 +305,7 @@ class Session:
 
         raise GameNotRunning("Текущее событие не найдено в паке.")
 
-    def register_vote(self, user_id: int, faction_id: FactionId) -> bool:
+    def register_vote(self, user_id: int, faction_id: str) -> bool:
         if self.status != SessionStatus.IN_GAME:
             raise GameNotRunning("Голосование доступно только в запущенной игре.")
 
@@ -335,7 +335,7 @@ class Session:
 
         faction_ids = [faction.id for faction in pack.factions]
         if not faction_ids:
-            faction_ids = list(FactionId)
+            faction_ids = [member.value for member in FactionId]
 
         for player in self.players.values():
             if player.auto_vote and player.vote is None:
