@@ -106,15 +106,3 @@ class GamePackMeta(BaseModel):
     name: str
     description: str = ""
     file: str | None = None
-
-
-class PartyRecord(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    user_id: int
-    name: str
-    slogan: str
-    ideology: str
-
-    def to_party(self) -> Party:
-        return Party.create(name=self.name, slogan=self.slogan, ideology=self.ideology)

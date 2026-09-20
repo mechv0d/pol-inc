@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pol_inc.domain.errors import PartyError
-from pol_inc.domain.packs import PartyRecord
+from pol_inc.domain.session import PartyRecord
 from pol_inc.infrastructure.supabase import SupabaseStorageClient
 
 

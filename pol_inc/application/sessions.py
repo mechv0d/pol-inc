@@ -18,8 +18,8 @@ from pol_inc.domain.errors import (
     UserNotInSession,
     VoteError,
 )
-from pol_inc.domain.packs import GamePack, GamePackMeta, PartyRecord
-from pol_inc.domain.session import Party, Session, TurnResolution
+from pol_inc.domain.packs import GamePack, GamePackMeta
+from pol_inc.domain.session import Party, PartyRecord, Session, TurnResolution
 from pol_inc.application.parties import PartyRepository
 
 logger = logging.getLogger(__name__)
@@ -388,8 +388,10 @@ class SessionManager:
 
         try:
             record = await self._party_repo.get(user_id)
-        except Exception:
-            logger.warning("Не удалось загрузить сохранённую партию user_id=%s", user_id)
+        except Exception as exc:
+            logger.warning(
+                "Не удалось загрузить сохранённую партию user_id=%s: %s", user_id, exc
+            )
             return
 
         if record is None:
@@ -401,8 +403,10 @@ class SessionManager:
 
         try:
             player.party = record.to_party()
-        except Exception:
-            logger.warning("Сохранённая партия user_id=%s некорректна", user_id)
+        except Exception as exc:
+            logger.warning(
+                "Сохранённая партия user_id=%s некорректна: %s", user_id, exc
+            )
 
     def _close_locked(self, session: Session) -> None:
         for user_id in list(session.players.keys()):
