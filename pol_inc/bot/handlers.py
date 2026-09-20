@@ -24,7 +24,7 @@ GROUP_TYPES = {"group", "supergroup"}
 async def start(message: Message) -> None:
     await message.answer(
         "<b>POL Inc.</b> — политическая игра.\n"
-        "Групповые команды: /newgame, /join, /leavegame, /game, /ss pack <id>\n"
+        "Групповые команды: /newgame, /join, /leavegame, /game, /ss pack id\n"
         "Личные команды: /reg Название | Слоган | Идеология"
     )
 
@@ -201,13 +201,13 @@ async def ss(
         return
 
     if not command.args:
-        await message.answer("Использование: /ss pack <id>")
+        await message.answer("Использование: /ss pack id")
         return
 
     parts = command.args.strip().split()
 
     if len(parts) < 2 or parts[0].lower() != "pack":
-        await message.answer("Пока поддерживается только: /ss pack <id>")
+        await message.answer("Пока поддерживается только: /ss pack id")
         return
 
     pack_id = parts[1].strip()

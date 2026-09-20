@@ -60,6 +60,6 @@ def format_pack_list(metas: list[GamePackMeta]) -> list[str]:
         lines.append(f"- <code>{esc(meta.id)}</code> — {esc(meta.name)}.{description}")
 
     lines.append("")
-    lines.append("Установка: /ss pack <id>")
+    lines.append("Установка: /ss pack id")
 
     return lines
