@@ -110,6 +110,7 @@ def format_lobby(session: Session) -> list[str]:
     elif session.pack is not None:
         lines.append("✅ Все партии зарегистрированы.")
         lines.append("Создатель может запустить игру: /startgame")
+        lines.append("Присоединиться к игре: /join")
 
     return lines
 
