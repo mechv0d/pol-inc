@@ -125,6 +125,23 @@ async def send_info_banner(
         logger.debug("Не удалось отправить game_info.jpg. Возможно, файла нет в бакете.")
         return None
 
+async def send_reg_banner(
+    bot: Bot,
+    chat_id: int,
+    pack_service: PackService,
+) -> int | None:
+    url = pack_service.image_url("game_reg.jpg")
+
+    if not url:
+        return None
+
+    try:
+        message = await bot.send_photo(chat_id=chat_id, photo=url)
+        return message.message_id
+    except Exception:
+        logger.debug("Не удалось отправить game_reg.jpg. Возможно, файла нет в бакете.")
+        return None
+
 
 async def try_set_default_pack(
     session_manager: SessionManager,
@@ -202,7 +219,7 @@ async def start(message: Message) -> None:
     await message.answer(
         "<b>POL Inc.</b> — политическая игра.\n"
         "Групповые команды: /newgame, /join, /leavegame, /game, /ss, /startgame\n"
-        "Личные команды: /reg, /vote <номер>, /cancel"
+        "Личные команды: /reg, /vote номер, /cancel"
     )
 
 
@@ -491,7 +508,7 @@ async def ss(
 
         if subcommand == "turns":
             if len(parts) < 2:
-                await message.answer("Использование: /ss turns <число>")
+                await message.answer("Использование: /ss turns число")
                 return
 
             if not parts[1].strip().isdigit():
@@ -510,7 +527,7 @@ async def ss(
             await send_or_update_lobby(bot, session_manager, session)
             return
 
-        await message.answer("Пока поддерживается только: /ss pack id и /ss turns <число>")
+        await message.answer("Пока поддерживается только: /ss pack id и /ss turns число")
     except PolIncError as exc:
         await message.answer(f"Не удалось применить настройку: {esc(exc)}")
 
@@ -734,7 +751,7 @@ async def vote(
         return
 
     if not command.args:
-        await message.answer("Использование: /vote <номер>")
+        await message.answer("Использование: /vote номер")
         return
 
     try:
