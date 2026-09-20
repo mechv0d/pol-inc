@@ -212,10 +212,10 @@ class PackEditorApp:
         on_delete,
     ) -> None:
         ttk.Button(buttons, text="Добавить", command=on_add).pack(
-            side="left", expand=True, fill="x"
+            side="top", fill="x", pady=(0, 2)
         )
         ttk.Button(buttons, text="Удалить", command=on_delete).pack(
-            side="left", expand=True, fill="x", padx=(4, 0)
+            side="top", fill="x"
         )
         listbox.bind(
             "<Delete>", lambda _event, delete=on_delete: delete()
@@ -655,10 +655,10 @@ class PackEditorApp:
         outcome_buttons = ttk.Frame(middle)
         outcome_buttons.pack(fill="x", pady=4)
         ttk.Button(outcome_buttons, text="Добавить", command=self.outcome_add).pack(
-            side="left", expand=True, fill="x"
+            side="top", fill="x", pady=(0, 2)
         )
         ttk.Button(outcome_buttons, text="Удалить", command=self.outcome_delete).pack(
-            side="left", expand=True, fill="x", padx=(4, 0)
+            side="top", fill="x"
         )
         self.outcomes_list.bind(
             "<Delete>", lambda _event: self.outcome_delete()
