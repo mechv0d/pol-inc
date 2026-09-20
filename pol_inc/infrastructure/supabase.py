@@ -11,12 +11,13 @@ from pol_inc.domain.errors import PackLoadError, PackNotFound
 class SupabaseStorageClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._headers = {
+            "apikey": settings.supabase_service_role_key,
+            "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        }
         self._client = httpx.AsyncClient(
             base_url=settings.supabase_url.rstrip("/"),
-            headers={
-                "apikey": settings.supabase_service_role_key,
-                "Authorization": f"Bearer {settings.supabase_service_role_key}",
-            },
+            headers=self._headers,
             timeout=httpx.Timeout(30.0),
         )
 
@@ -59,7 +60,10 @@ class SupabaseStorageClient:
             response = await self._client.post(
                 path,
                 json=data,
-                headers={"x-upsert": "true"},
+                headers={
+                    "x-upsert": "true",
+                    **self._headers,
+                },
             )
         except httpx.HTTPError as exc:
             raise PackLoadError("Не удалось сохранить данные в Supabase Storage.") from exc
@@ -81,10 +85,14 @@ class SupabaseStorageClient:
 
     async def delete_party(self, user_id: int) -> None:
         bucket = self._settings.party_bucket
+        path = f"/storage/v1/object/{bucket}/{user_id}.json"
         try:
-            await self._client.delete(
-                f"/storage/v1/object/{bucket}/{user_id}.json",
+            response = await self._client.delete(
+                path,
+                headers=self._headers,
             )
+            if response.status_code >= 400:
+                raise PackLoadError(f"Supabase Storage вернул статус {response.status_code}.")
         except httpx.HTTPError as exc:
             raise PackLoadError("Не удалось удалить партию из Supabase Storage.") from exc
 
