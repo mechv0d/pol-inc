@@ -204,6 +204,23 @@ class PackEditorApp:
         buttons.pack(side="bottom", fill="x", pady=4)
         return buttons, listbox
 
+    def list_actions(
+        self,
+        buttons: ttk.Frame,
+        listbox: tk.Listbox,
+        on_add,
+        on_delete,
+    ) -> None:
+        ttk.Button(buttons, text="Добавить", command=on_add).pack(
+            side="left", expand=True, fill="x"
+        )
+        ttk.Button(buttons, text="Удалить", command=on_delete).pack(
+            side="left", expand=True, fill="x", padx=(4, 0)
+        )
+        listbox.bind(
+            "<Delete>", lambda _event, delete=on_delete: delete()
+        )
+
     @staticmethod
     def selected_index(listbox: tk.Listbox) -> int | None:
         selection = listbox.curselection()
@@ -255,9 +272,8 @@ class PackEditorApp:
 
     def _build_factions_tab(self) -> None:
         buttons, self.factions_list = self.list_panel(self.tab_factions)
-        ttk.Button(buttons, text="+", width=4, command=self.faction_add).pack(side="left")
-        ttk.Button(buttons, text="-", width=4, command=self.faction_delete).pack(
-            side="left", padx=4
+        self.list_actions(
+            buttons, self.factions_list, self.faction_add, self.faction_delete
         )
         self.factions_list.bind("<<ListboxSelect>>", self._on_faction_select)
 
@@ -353,6 +369,7 @@ class PackEditorApp:
     def faction_delete(self) -> None:
         index = self.selected_index(self.factions_list)
         if index is None:
+            self.set_status("Выберите фракцию для удаления.")
             return
 
         self.current_faction = None
@@ -361,14 +378,14 @@ class PackEditorApp:
         self.load_faction_fields()
         self.mark_dirty()
         self.refresh_alliance_faction_box()
+        self.set_status("Фракция удалена.")
 
     # ---------- вкладка "Альянсы" ----------
 
     def _build_alliances_tab(self) -> None:
         buttons, self.alliances_list = self.list_panel(self.tab_alliances)
-        ttk.Button(buttons, text="+", width=4, command=self.alliance_add).pack(side="left")
-        ttk.Button(buttons, text="-", width=4, command=self.alliance_delete).pack(
-            side="left", padx=4
+        self.list_actions(
+            buttons, self.alliances_list, self.alliance_add, self.alliance_delete
         )
         self.alliances_list.bind("<<ListboxSelect>>", self._on_alliance_select)
 
@@ -473,6 +490,7 @@ class PackEditorApp:
     def alliance_delete(self) -> None:
         index = self.selected_index(self.alliances_list)
         if index is None:
+            self.set_status("Выберите альянс для удаления.")
             return
 
         self.current_alliance = None
@@ -480,14 +498,14 @@ class PackEditorApp:
         self.reload_alliances_list()
         self.load_alliance_fields()
         self.mark_dirty()
+        self.set_status("Альянс удалён.")
 
     # ---------- вкладка "Способности" ----------
 
     def _build_abilities_tab(self) -> None:
         buttons, self.abilities_list = self.list_panel(self.tab_abilities)
-        ttk.Button(buttons, text="+", width=4, command=self.ability_add).pack(side="left")
-        ttk.Button(buttons, text="-", width=4, command=self.ability_delete).pack(
-            side="left", padx=4
+        self.list_actions(
+            buttons, self.abilities_list, self.ability_add, self.ability_delete
         )
         self.abilities_list.bind("<<ListboxSelect>>", self._on_ability_select)
 
@@ -607,6 +625,7 @@ class PackEditorApp:
     def ability_delete(self) -> None:
         index = self.selected_index(self.abilities_list)
         if index is None:
+            self.set_status("Выберите способность для удаления.")
             return
 
         self.current_ability = None
@@ -614,14 +633,14 @@ class PackEditorApp:
         self.reload_abilities_list()
         self.load_ability_fields()
         self.mark_dirty()
+        self.set_status("Способность удалена.")
 
     # ---------- вкладка "События" ----------
 
     def _build_events_tab(self) -> None:
         buttons, self.events_list = self.list_panel(self.tab_events)
-        ttk.Button(buttons, text="+", width=4, command=self.event_add).pack(side="left")
-        ttk.Button(buttons, text="-", width=4, command=self.event_delete).pack(
-            side="left", padx=4
+        self.list_actions(
+            buttons, self.events_list, self.event_add, self.event_delete
         )
         self.events_list.bind("<<ListboxSelect>>", self._on_event_select)
 
@@ -635,11 +654,14 @@ class PackEditorApp:
 
         outcome_buttons = ttk.Frame(middle)
         outcome_buttons.pack(fill="x", pady=4)
-        ttk.Button(outcome_buttons, text="+", width=4, command=self.outcome_add).pack(
-            side="left"
+        ttk.Button(outcome_buttons, text="Добавить", command=self.outcome_add).pack(
+            side="left", expand=True, fill="x"
         )
-        ttk.Button(outcome_buttons, text="-", width=4, command=self.outcome_delete).pack(
-            side="left", padx=4
+        ttk.Button(outcome_buttons, text="Удалить", command=self.outcome_delete).pack(
+            side="left", expand=True, fill="x", padx=(4, 0)
+        )
+        self.outcomes_list.bind(
+            "<Delete>", lambda _event: self.outcome_delete()
         )
 
         right = ttk.Frame(self.tab_events)
@@ -837,6 +859,7 @@ class PackEditorApp:
     def event_delete(self) -> None:
         index = self.selected_index(self.events_list)
         if index is None:
+            self.set_status("Выберите событие для удаления.")
             return
 
         self.current_event = None
@@ -846,6 +869,7 @@ class PackEditorApp:
         self.reload_outcomes_list()
         self.load_event_fields()
         self.mark_dirty()
+        self.set_status("Событие удалено.")
 
     def outcome_add(self) -> None:
         if self.current_event is None:
@@ -866,6 +890,7 @@ class PackEditorApp:
     def outcome_delete(self) -> None:
         index = self.selected_index(self.outcomes_list)
         if index is None:
+            self.set_status("Выберите исход для удаления.")
             return
 
         self.current_outcome = None
@@ -873,6 +898,7 @@ class PackEditorApp:
         self.reload_outcomes_list()
         self.load_outcome_fields()
         self.mark_dirty()
+        self.set_status("Исход удалён.")
 
     # ---------- вкладка "Изображения" ----------
 
