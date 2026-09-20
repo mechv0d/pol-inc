@@ -566,10 +566,22 @@ async def reg(
 
     player = session.players.get(message.from_user.id)
 
-    if player is not None and player.party is not None:
+    existing_party = None
+    try:
+        existing_party = await session_manager.get_persisted_party(message.from_user.id)
+    except Exception:
+        pass
+
+    has_existing = existing_party is not None or (player is not None and player.party is not None)
+
+    if has_existing:
+        party_name = ""
+        if existing_party is not None:
+            party_name = existing_party.name
+            await state.update_data(party_name=party_name)
         await message.answer(
-            f"У вас уже есть партия «{esc(player.party.name)}». "
-            "Она будет перезаписана.\n\n"
+            f"У вас уже есть партия «{esc(party_name)}». "
+            "Вы можете её перезаписать.\n\n"
             "Шаг 1/3. Отправьте название партии (до 30 символов).\n"
             "Отмена: /cancel"
         )

@@ -17,8 +17,9 @@ from pol_inc.domain.errors import (
     UserNotInSession,
     VoteError,
 )
-from pol_inc.domain.packs import GamePack, GamePackMeta
+from pol_inc.domain.packs import GamePack, GamePackMeta, PartyRecord
 from pol_inc.domain.session import Party, Session, TurnResolution
+from pol_inc.application.parties import PartyRepository
 
 
 @dataclass(slots=True)
@@ -40,12 +41,13 @@ class LeaveResult:
 class SessionManager:
     _alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, party_repo: PartyRepository | None = None) -> None:
         self._settings = settings
         self._sessions: dict[str, Session] = {}
         self._chat_to_code: dict[int, str] = {}
         self._user_to_code: dict[int, str] = {}
         self._lock = asyncio.Lock()
+        self._party_repo = party_repo
 
     def get(self, code: str) -> Session:
         session = self._sessions.get(code.upper())
@@ -263,7 +265,25 @@ class SessionManager:
 
             session = self._sessions[code]
             session.register_party(user_id=user_id, party=party)
+
+            if self._party_repo is not None:
+                record = PartyRecord(
+                    user_id=user_id,
+                    name=party.name,
+                    slogan=party.slogan,
+                    ideology=party.ideology,
+                )
+                await self._party_repo.upsert(record)
+
             return session
+
+    async def get_persisted_party(self, user_id: int) -> Party | None:
+        if self._party_repo is None:
+            return None
+        record = await self._party_repo.get(user_id)
+        if record is None:
+            return None
+        return record.to_party()
 
     async def start_game(self, chat_id: int, user_id: int) -> Session:
         async with self._lock:

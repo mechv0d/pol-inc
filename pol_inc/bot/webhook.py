@@ -11,6 +11,7 @@ from aiogram.types import BotCommand, Update
 from fastapi import FastAPI, HTTPException, Request
 
 from pol_inc.application.packs import PackService
+from pol_inc.application.parties import PartyRepository
 from pol_inc.application.sessions import SessionManager
 from pol_inc.config import get_settings
 from pol_inc.infrastructure.supabase import SupabaseStorageClient
@@ -47,7 +48,8 @@ async def cleanup_sessions(bot: Bot, session_manager: SessionManager) -> None:
 async def lifespan(app: FastAPI):
     storage = SupabaseStorageClient(settings)
     pack_service = PackService(storage=storage, settings=settings)
-    session_manager = SessionManager(settings=settings)
+    party_repo = PartyRepository(storage=storage)
+    session_manager = SessionManager(settings=settings, party_repo=party_repo)
 
     bot = Bot(
         token=settings.bot_token,
