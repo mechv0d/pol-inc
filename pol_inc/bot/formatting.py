@@ -9,6 +9,7 @@ from pol_inc.domain.tarbin_game import (
     TurnReport,
     role_category,
     slots_for_role,
+    tech_flags,
 )
 from pol_inc.domain.tarbin_pack import TarbinGamePack
 
@@ -336,7 +337,32 @@ def format_status(session) -> list[str]:
             total_slots = sum(slots_for_role(pack, state) for _ in state.active_roles)
             filled = sum(len(subs) for subs in state.submissions.values())
             lines.append(f"Заявки: {filled}/{total_slots}")
+            lines.append(f"Цены: {esc(_price_modifiers(session))}")
     return lines
+
+
+def _price_modifiers(session) -> str:
+    state = session.state
+    pack = session.pack
+    if state is None or pack is None:
+        return "базовые"
+    parts = [f"коррупция ×{1 + state.corruption / 200:.2f}"]
+    if state.deficit_mult != 1.0:
+        parts.append(f"дефицит ×{state.deficit_mult}")
+    flags = tech_flags(pack, state)
+    discounts = []
+    if state.cost_discount:
+        discounts.append(f"оптимизация −{state.cost_discount}")
+    for flag, label in (
+        ("military_discount", "армия"),
+        ("civic_discount", "гражданские"),
+        ("info_discount", "связь"),
+    ):
+        if flags.get(flag):
+            discounts.append(f"{label} −{flags[flag]}")
+    if discounts:
+        parts.append("скидки: " + ", ".join(discounts))
+    return "; ".join(parts)
 
 
 def format_regions(session, show_hideouts: bool = False) -> list[str]:
