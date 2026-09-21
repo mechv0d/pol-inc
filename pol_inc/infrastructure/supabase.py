@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def _response_detail(response: httpx.Response, limit: int = 500) -> str:
     try:
         text = response.text
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ""
 
     return text[:limit]
@@ -68,7 +68,9 @@ class SupabaseStorageClient:
         try:
             return response.json()
         except ValueError as exc:
-            raise PackLoadError("Ответ Supabase Storage не является корректным JSON.") from exc
+            raise PackLoadError(
+                "Ответ Supabase Storage не является корректным JSON."
+            ) from exc
 
     async def ensure_bucket(self, bucket: str, public: bool = False) -> None:
         if bucket in self._ensured_buckets:
@@ -79,7 +81,9 @@ class SupabaseStorageClient:
         try:
             response = await self._client.get(path)
         except httpx.HTTPError as exc:
-            raise PackLoadError("Не удалось проверить бакет в Supabase Storage.") from exc
+            raise PackLoadError(
+                "Не удалось проверить бакет в Supabase Storage."
+            ) from exc
 
         if response.status_code == 404:
             try:
@@ -88,7 +92,9 @@ class SupabaseStorageClient:
                     json={"id": bucket, "name": bucket, "public": public},
                 )
             except httpx.HTTPError as exc:
-                raise PackLoadError("Не удалось создать бакет в Supabase Storage.") from exc
+                raise PackLoadError(
+                    "Не удалось создать бакет в Supabase Storage."
+                ) from exc
 
             if created.status_code == 409:
                 logger.info("Бакет %s уже существует.", bucket)
@@ -141,7 +147,9 @@ class SupabaseStorageClient:
                 },
             )
         except httpx.HTTPError as exc:
-            raise PackLoadError("Не удалось сохранить данные в Supabase Storage.") from exc
+            raise PackLoadError(
+                "Не удалось сохранить данные в Supabase Storage."
+            ) from exc
 
         if response.status_code >= 400:
             detail = _response_detail(response)
@@ -185,7 +193,9 @@ class SupabaseStorageClient:
                 },
             )
         except httpx.HTTPError as exc:
-            raise PackLoadError("Не удалось загрузить файл в Supabase Storage.") from exc
+            raise PackLoadError(
+                "Не удалось загрузить файл в Supabase Storage."
+            ) from exc
 
         if response.status_code >= 400:
             detail = _response_detail(response)
@@ -228,56 +238,6 @@ class SupabaseStorageClient:
             )
 
         return response.content
-
-    async def upload_party_photo(self, user_id: int, data: bytes) -> str:
-        object_name = f"{user_id}.jpg"
-        await self.upload_bytes(
-            self._settings.party_images_bucket,
-            object_name,
-            data,
-            content_type="image/jpeg",
-        )
-        return object_name
-
-    async def download_party_photo(self, object_name: str) -> bytes:
-        return await self.download_bytes(
-            self._settings.party_images_bucket, object_name
-        )
-
-    async def get_party(self, user_id: int) -> dict | None:
-        bucket = self._settings.party_bucket
-        await self.ensure_bucket(bucket)
-        try:
-            data = await self.get_json(bucket, f"{user_id}.json")
-            return data
-        except PackNotFound:
-            return None
-
-    async def upsert_party(self, user_id: int, data: dict) -> None:
-        bucket = self._settings.party_bucket
-        await self.upsert_json(bucket, f"{user_id}.json", data)
-
-    async def delete_party(self, user_id: int) -> None:
-        bucket = self._settings.party_bucket
-        path = f"/storage/v1/object/{quote(bucket, safe='')}/{user_id}.json"
-        try:
-            response = await self._client.delete(
-                path,
-                headers=self._headers,
-            )
-            if response.status_code >= 400:
-                detail = _response_detail(response)
-                logger.warning(
-                    "Supabase Storage DELETE %s вернул статус %s: %s",
-                    path,
-                    response.status_code,
-                    detail,
-                )
-                raise PackLoadError(
-                    f"Supabase Storage вернул статус {response.status_code}: {detail}"
-                )
-        except httpx.HTTPError as exc:
-            raise PackLoadError("Не удалось удалить партию из Supabase Storage.") from exc
 
     def public_url(self, bucket: str, object_name: str | None) -> str | None:
         if not object_name:

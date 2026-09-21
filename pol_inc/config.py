@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from functools import lru_cache
-from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -31,15 +29,15 @@ class Settings(BaseSettings):
     packs_bucket: str = "game-packs"
     packs_index_object: str = "index.json"
     images_bucket: str = "pack-images"
-    party_bucket: str = "parties"
-    party_images_bucket: str = "party-images"
 
     session_ttl_hours: int = 4
-    max_players: int = 4
+    max_players: int = 6
     min_players: int = 2
-    default_pack_id: str = "base"
+    default_pack_id: str = "tarbin_classic_v1"
 
-    @field_validator("bot_token", "supabase_service_role_key", "telegram_webhook_secret")
+    @field_validator(
+        "bot_token", "supabase_service_role_key", "telegram_webhook_secret"
+    )
     @classmethod
     def strip_secrets(cls, value: str) -> str:
         return value.strip()
@@ -64,8 +62,8 @@ class Settings(BaseSettings):
     @field_validator("max_players")
     @classmethod
     def validate_max_players(cls, value: int) -> int:
-        if value < 2 or value > 4:
-            raise ValueError("MAX_PLAYERS должен быть от 2 до 4.")
+        if value < 2 or value > 6:
+            raise ValueError("MAX_PLAYERS должен быть от 2 до 6.")
         return value
 
     @field_validator("min_players")
@@ -76,7 +74,7 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def validate_players_limits(self) -> "Settings":
+    def validate_players_limits(self) -> Settings:
         if self.min_players > self.max_players:
             raise ValueError("MIN_PLAYERS не может быть больше MAX_PLAYERS.")
         return self
@@ -88,4 +86,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]
