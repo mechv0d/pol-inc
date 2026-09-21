@@ -1,7 +1,7 @@
-"""Логика редактора GamePack без GUI: загрузка, валидация, сохранение и сбор изображений.
+"""Логика редактора TARBIN-паков без GUI: загрузка, валидация, сохранение и сбор изображений.
 
-Использует pydantic-модели проекта, поэтому правила валидации всегда совпадают
-с теми, что применяет бот при загрузке пака.
+Использует pydantic-модели проекта (pol_inc.domain.tarbin_pack), поэтому правила
+валидации всегда совпадают с теми, что применяет движок при загрузке пака.
 """
 
 from __future__ import annotations
@@ -15,49 +15,145 @@ GLOBAL_BANNERS = ["game_info.jpg", "game_reg.jpg"]
 
 
 def new_pack_template() -> dict:
-    """Минимальный валидный пак-заготовка для написания с нуля."""
+    """Минимальный валидный TARBIN-пак для написания с нуля."""
     return {
+        "schema_version": "1.0",
+        "pack_type": "TARBIN",
         "id": "new_pack",
         "name": "Новый пак",
         "description": "",
+        "language": "ru",
         "durations": [8],
-        "factions": [
+        "settings": {
+            "min_players": 2,
+            "max_players": 6,
+            "action_points_per_role": 1,
+            "event_turns": [],
+            "start_budget": 120,
+            "start_initiative": 50,
+            "start_trust": 0,
+            "start_corruption": 0,
+            "start_al_nazra_support": 10,
+            "initiative_decay": 4,
+            "base_income": 10,
+            "timeout_hours": 4,
+        },
+        "roles": [
             {
-                "id": "faction_1",
-                "name": "Фракция 1",
-                "color": "",
-                "emoji": "",
-                "feature": "",
+                "id": "commander",
+                "name": "Командующий",
+                "short_name": "CMD",
+                "description": "",
+                "passive": "",
+                "available_actions": ["CMD-01"],
             },
             {
-                "id": "faction_2",
-                "name": "Фракция 2",
-                "color": "",
-                "emoji": "",
-                "feature": "",
+                "id": "military_coordinator",
+                "name": "Координатор",
+                "short_name": "MIL",
+                "description": "",
+                "passive": "",
+                "available_actions": ["MIL-01"],
             },
         ],
-        "alliances": [],
-        "abilities": [],
+        "regions": [
+            {
+                "id": "R1",
+                "name": "Регион 1",
+                "type": "",
+                "population": 1000,
+                "economy": 20,
+                "trust": 0,
+                "security": 25,
+                "government": 40,
+                "al_nazra": 10,
+                "infrastructure": 30,
+            }
+        ],
+        "tech_tree": [
+            {
+                "id": "T1",
+                "branch": "security",
+                "tier": 1,
+                "name": "Технология 1",
+                "cost": 5,
+                "prerequisites": [],
+                "unlocks_actions": [],
+                "flags": {},
+            }
+        ],
+        "actions": [
+            {
+                "id": "CMD-01",
+                "role_id": "commander",
+                "name": "Действие командующего",
+                "description": "",
+                "type": "operation",
+                "cost": 2,
+                "target": "none",
+                "cooldown": 0,
+                "requirements": {},
+                "effects": [],
+                "tags": [],
+                "upkeep": {},
+                "next_income_bonus": 0,
+                "next_cost_discount": 0,
+            },
+            {
+                "id": "MIL-01",
+                "role_id": "military_coordinator",
+                "name": "Действие координатора",
+                "description": "",
+                "type": "operation",
+                "cost": 2,
+                "target": "none",
+                "cooldown": 0,
+                "requirements": {},
+                "effects": [],
+                "tags": [],
+                "upkeep": {},
+                "next_income_bonus": 0,
+                "next_cost_discount": 0,
+            },
+        ],
         "events": [
             {
-                "id": "event_1",
+                "id": "EVT-01",
                 "title": "Новое событие",
                 "description": "",
                 "banner": None,
-                "outcomes": [
+                "target_scope": "global",
+                "default_region_filter": {},
+                "options": [
                     {
-                        "id": "outcome_1",
-                        "description": "",
-                        "banner": None,
-                        "effects": {
-                            "faction_1": {"percent": 0, "influence": 0},
-                            "faction_2": {"percent": 0, "influence": 0},
-                        },
+                        "id": "A",
+                        "title": "Вариант 1",
+                        "cost": 0,
+                        "effects": [],
+                        "outcomes": [],
                     }
                 ],
             }
         ],
+        "al_nazra": {
+            "intentions": [
+                {"id": "intent_1", "name": "Намерение 1", "description": ""}
+            ],
+            "operations": [
+                {
+                    "id": "op_1",
+                    "name": "Операция 1",
+                    "min_support": 0,
+                    "tags": [],
+                    "effects": [],
+                    "region_effects": [],
+                    "region_modifier": "",
+                }
+            ],
+            "hideout_threshold": 40,
+            "hideout_security_max": 30,
+        },
+        "assets": {"cover": None},
     }
 
 
@@ -73,10 +169,10 @@ def load_pack_file(path: str | Path) -> dict:
 
 def validate_pack(data: dict) -> list[str]:
     """Возвращает список человекочитаемых ошибок. Пустой список = пак валиден."""
-    from pol_inc.domain.packs import GamePack
+    from pol_inc.domain.tarbin_pack import TarbinGamePack
 
     try:
-        GamePack.model_validate(data)
+        TarbinGamePack.model_validate(data)
     except ValidationError as exc:
         return [format_pydantic_error(err) for err in exc.errors()]
 
@@ -100,10 +196,11 @@ def save_pack_file(path: str | Path, data: dict) -> None:
 
 
 def collect_images(data: dict, include_global: bool = True) -> list[dict]:
-    """Собирает все имена изображений пака.
+    """Собирает все имена изображений TARBIN-пака.
 
     Возвращает список {"name": ..., "usages": [...]} отсортированный по имени.
     """
+
     usages: dict[str, list[str]] = {}
 
     def add(name: object, usage: str) -> None:
@@ -123,12 +220,25 @@ def collect_images(data: dict, include_global: bool = True) -> list[dict]:
         event_label = event.get("title") or event.get("id") or "?"
         add(event.get("banner"), f"событие «{event_label}»")
 
-        for outcome in event.get("outcomes", []) or []:
-            if not isinstance(outcome, dict):
+        for option in event.get("options", []) or []:
+            if not isinstance(option, dict):
                 continue
 
-            outcome_label = outcome.get("id") or "?"
-            add(outcome.get("banner"), f"исход «{outcome_label}» события «{event_label}»")
+            option_label = option.get("id") or "?"
+            for outcome in option.get("outcomes", []) or []:
+                if not isinstance(outcome, dict):
+                    continue
+
+                outcome_label = outcome.get("id") or "?"
+                add(
+                    outcome.get("banner"),
+                    f"исход «{outcome_label}» варианта «{option_label}» "
+                    f"события «{event_label}»",
+                )
+
+    assets = data.get("assets", {}) or {}
+    if isinstance(assets, dict):
+        add(assets.get("cover"), "обложка пака (assets.cover)")
 
     if include_global:
         for name in GLOBAL_BANNERS:
