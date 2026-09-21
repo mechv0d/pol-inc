@@ -36,6 +36,66 @@ ROLE_ORDER = [
 
 STATUS_RANK = {"occupied": 0, "contested": 1, "unstable": 2, "stable": 3}
 
+# Категории ролей для отображения: военные, гражданские, экономические, штаб.
+ROLE_CATEGORY = {
+    "commander": "🏛",
+    "military_coordinator": "🔴",
+    "intel_chief": "🔴",
+    "civil_admin": "🟢",
+    "liaison": "🟢",
+    "finance_director": "🔵",
+}
+
+BRANCH_CATEGORY = {
+    "security": "🔴",
+    "intel": "🔴",
+    "civil": "🟢",
+    "civil_admin": "🟢",
+    "info": "🟢",
+    "economy": "🔵",
+}
+
+STAT_LABELS = {
+    "trust": "доверие",
+    "trust_global": "доверие",
+    "initiative": "инициатива",
+    "economy": "экономика",
+    "security": "безопасность",
+    "government": "управление",
+    "al_nazra": "боевики",
+    "al_nazra_support": "боевики",
+    "corruption": "коррупция",
+    "budget": "бюджет",
+    "infrastructure": "инфраструктура",
+}
+
+
+def role_category(role_id: str) -> str:
+    return ROLE_CATEGORY.get(role_id, "⚪")
+
+
+def magnitude_label(delta: int) -> str:
+    magnitude = abs(delta)
+    if magnitude >= 6:
+        marks = "+++"
+    elif magnitude >= 3:
+        marks = "++"
+    else:
+        marks = "+"
+    return marks if delta > 0 else marks.replace("+", "-")
+
+
+def action_summary(action) -> str:
+    parts: list[str] = []
+
+    for effect in action.effects:
+        if effect.delta == 0:
+            continue
+        label = STAT_LABELS.get(effect.stat, effect.stat)
+        parts.append(f"{magnitude_label(effect.delta)}{label}")
+
+    return ", ".join(parts)
+
 
 @dataclass(slots=True)
 class RegionState:
@@ -242,7 +302,7 @@ def validate_action_submit(
 
     used = len(state.submissions.get(role_id, []))
     if used >= slots_for_role(pack, state):
-        return 0, "У роли no больше нет действий в этом ходу."
+        return 0, "У роли больше нет действий в этом ходу."
 
     for submitted in state.submissions.get(role_id, []):
         if submitted.kind == "action" and submitted.action_id == action_id:
@@ -1030,7 +1090,7 @@ def average(values) -> float:
 def check_endings(pack, state, report) -> None:
     if state.trust >= 100 and state.al_support <= 20 and state.initiative > 0:
         report.result = "victory_full"
-        report.result_reason = "Полная победа: доверие 100%, Al Nazra подавлена."
+        report.result_reason = "Полная победа: доверие 100%, Аль Назра подавлена."
         return
 
     if state.initiative <= 0:
@@ -1045,7 +1105,7 @@ def check_endings(pack, state, report) -> None:
 
     if state.al_support >= 100:
         report.result = "defeat"
-        report.result_reason = "Поражение: Al Nazra захватила страну."
+        report.result_reason = "Поражение: Аль Назра захватила страну."
         return
 
     occupied = [

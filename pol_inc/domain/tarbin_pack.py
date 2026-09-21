@@ -111,6 +111,7 @@ class TechDef(BaseModel):
     branch: str
     tier: int = 1
     name: str
+    description: str = ""
     cost: int = 0
     prerequisites: list[str] = Field(default_factory=list)
     unlocks_actions: list[str] = Field(default_factory=list)
