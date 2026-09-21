@@ -88,3 +88,7 @@ class VoteChangeCooldown(VoteError):
 
 class PlayerEliminated(SessionError):
     """Игрок покинул активную игру и не может голосовать вручную."""
+
+
+class ActionError(SessionError):
+    """Ошибка действия, исследования или голосования."""
