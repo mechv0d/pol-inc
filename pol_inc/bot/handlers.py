@@ -504,7 +504,7 @@ async def operation(
     if message.from_user is None:
         return
     if not command.args or not command.args.strip():
-        await message.answer("Использование: /operation <название>")
+        await message.answer("Использование: /operation &lt;название&gt;")
         return
 
     session = await session_manager.set_operation_name(
