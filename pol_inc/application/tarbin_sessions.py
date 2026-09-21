@@ -33,7 +33,11 @@ from pol_inc.domain.tarbin_game import (
     validate_action_submit,
     validate_research_submit,
 )
-from pol_inc.domain.tarbin_pack import TarbinGamePack, active_roles_for_players
+from pol_inc.domain.tarbin_pack import (
+    FULL_STAFF,
+    TarbinGamePack,
+    active_roles_for_players,
+)
 
 
 @dataclass(slots=True)
@@ -42,7 +46,6 @@ class TarbinPlayer:
     username: str | None
     display_name: str | None = None
     role_ids: list[str] = field(default_factory=list)
-    confirmed: bool = False
 
     @property
     def public_name(self) -> str:
@@ -74,6 +77,8 @@ class TarbinSession:
     state: GameState | None = None
     active_roles: list[str] = field(default_factory=list)
     role_owners: dict[str, int] = field(default_factory=dict)
+    next_ready: set[int] = field(default_factory=set)
+    menu_message_ids: dict[int, int] = field(default_factory=dict)
 
     def owner_of(self, role_id: str) -> TarbinPlayer | None:
         user_id = self.role_owners.get(role_id)
@@ -275,6 +280,8 @@ class TarbinSessionManager:
                     report = self._resolve_locked(session)
                     if report.result:
                         self._finish_locked(session)
+                    else:
+                        self._advance_locked(session)
 
                 if not session.players:
                     self._close_locked(session)
@@ -409,8 +416,22 @@ class TarbinSessionManager:
             players = list(session.players.values())
             session.active_roles = active
             session.role_owners = {}
-            for index, role_id in enumerate(active):
-                owner = players[index % len(players)]
+
+            for player in players:
+                player.role_ids = [
+                    role_id for role_id in player.role_ids if role_id in active
+                ]
+
+            for player in players:
+                for role_id in player.role_ids:
+                    if role_id not in session.role_owners:
+                        session.role_owners[role_id] = player.user_id
+
+            unclaimed = [
+                role_id for role_id in active if role_id not in session.role_owners
+            ]
+            for role_id in unclaimed:
+                owner = min(players, key=lambda p: len(p.role_ids))
                 owner.role_ids.append(role_id)
                 session.role_owners[role_id] = owner.user_id
 
@@ -458,7 +479,6 @@ class TarbinSessionManager:
                     cost_paid=cost,
                 )
             )
-            player.confirmed = False
 
             return self._is_ready_locked(session)
 
@@ -485,7 +505,6 @@ class TarbinSessionManager:
                     cost_paid=cost,
                 )
             )
-            player.confirmed = False
 
             return self._is_ready_locked(session)
 
@@ -498,8 +517,6 @@ class TarbinSessionManager:
 
             for role_id in player.role_ids:
                 state.submissions.pop(role_id, None)
-
-            player.confirmed = False
 
     async def set_priority(self, user_id: int, direction: str) -> None:
         async with self._lock:
@@ -516,7 +533,7 @@ class TarbinSessionManager:
 
             state.priority = direction
 
-    async def vote_event(self, user_id: int, option_id: str) -> None:
+    async def vote_event(self, user_id: int, option_id: str) -> bool:
         async with self._lock:
             session, _player, state = self._player_state_locked(user_id)
 
@@ -531,16 +548,69 @@ class TarbinSessionManager:
                 raise ActionError("Такого варианта нет.")
 
             state.event_votes[user_id] = option_id
+            return self._is_ready_locked(session)
 
-    async def confirm(self, user_id: int) -> bool:
+    async def confirm_next(self, user_id: int) -> bool:
         async with self._lock:
-            session, player, state = self._player_state_locked(user_id)
+            code = self._user_to_code.get(user_id)
+            if code is None:
+                raise UserNotInSession("Вы не участвуете в операции.")
 
-            if state is None:
+            session = self._sessions.get(code)
+            if session is None:
+                raise SessionNotFound("Операция не найдена.")
+
+            if session.status != SessionStatus.IN_GAME or session.state is None:
                 raise ActionError("Игра сейчас не запущена.")
 
-            player.confirmed = True
-            return self._is_ready_locked(session)
+            session.next_ready.add(user_id)
+            return session.next_ready >= set(session.players.keys())
+
+    async def pick_role(self, user_id: int, role_id: str) -> tuple[TarbinSession, bool]:
+        """Выбор роли на этапе подготовки. Возвращает (сессия, выбрана?)."""
+        async with self._lock:
+            code = self._user_to_code.get(user_id)
+            if code is None:
+                raise UserNotInSession("Вы не участвуете в операции.")
+
+            session = self._sessions.get(code)
+            if session is None:
+                raise SessionNotFound("Операция не найдена.")
+
+            if session.status != SessionStatus.NEW:
+                raise SessionAlreadyStarted("Роли выбираются до старта игры.")
+
+            available = (
+                [role.id for role in session.pack.roles]
+                if session.pack is not None
+                else list(FULL_STAFF)
+            )
+            if role_id not in available:
+                raise ActionError("Такой роли нет.")
+
+            player = session.players.get(user_id)
+            if player is None:
+                raise UserNotInSession("Вы не участвуете в операции.")
+
+            for other in session.players.values():
+                if other.user_id != user_id and role_id in other.role_ids:
+                    raise ActionError("Роль уже занята.")
+
+            if role_id in player.role_ids:
+                player.role_ids.remove(role_id)
+                return session, False
+
+            player.role_ids.append(role_id)
+            return session, True
+
+    async def research_available(
+        self, session: TarbinSession, role_id: str
+    ) -> list[ResearchOption]:
+        return [
+            option
+            for option in self.research_options(session, role_id)
+            if not option.locked_reason
+        ]
 
     async def resolve(self, chat_id: int) -> tuple[TarbinSession, TurnReport]:
         async with self._lock:
@@ -553,17 +623,35 @@ class TarbinSessionManager:
                 raise ActionError("В операции нет пака.")
 
             if not self._is_ready_locked(session):
-                raise ActionError("Не все игроки готовы.")
+                raise ActionError(
+                    "Ход не готов: нужны заявки всех ролей и голоса всех игроков."
+                )
 
             report = self._resolve_locked(session)
 
             if report.result:
                 self._finish_locked(session)
-            else:
-                session.state.turn += 1
-                pick_event_for_turn(session.pack, session.state, self._rng)
 
             return session, report
+
+    async def advance_turn(self, chat_id: int) -> TarbinSession:
+        async with self._lock:
+            session = self._session_by_chat_locked(chat_id)
+
+            if session.status != SessionStatus.IN_GAME or session.state is None:
+                raise ActionError("Игра сейчас не запущена.")
+
+            if session.pack is None:
+                raise ActionError("В операции нет пака.")
+
+            self._advance_locked(session)
+            return session
+
+    def _advance_locked(self, session: TarbinSession) -> None:
+        assert session.pack is not None and session.state is not None
+        session.state.turn += 1
+        session.next_ready = set()
+        pick_event_for_turn(session.pack, session.state, self._rng)
 
     # ----- данные для интерфейса -----
 
@@ -677,9 +765,6 @@ class TarbinSessionManager:
 
         state = session.state
         for player in session.players.values():
-            if player.confirmed:
-                continue
-
             owned = [
                 role
                 for role in player.role_ids
@@ -691,6 +776,11 @@ class TarbinSessionManager:
             for role_id in owned:
                 filled = len(state.submissions.get(role_id, []))
                 if filled < slots_for_role(session.pack, state):
+                    return False
+
+        if state.event_id:
+            for user_id in session.players:
+                if user_id not in state.event_votes:
                     return False
 
         return True
