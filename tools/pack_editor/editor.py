@@ -805,6 +805,7 @@ class PackEditorApp:
         self.tech_branch_entry = self.entry_row(right, "Ветка")
         self.tech_tier_entry = self.entry_row(right, "Тир")
         self.tech_name_entry = self.entry_row(right, "Название")
+        self.tech_desc_text = self.text_block(right, "Описание", height=3)
         self.tech_cost_entry = self.entry_row(right, "Стоимость")
 
         ttk.Label(right, text="Prerequisites:", anchor="w").pack(fill="x", pady=(6, 2))
@@ -877,6 +878,8 @@ class PackEditorApp:
         self.tech_tier_entry.insert(0, str(tech.get("tier", 1)))
         self.tech_name_entry.delete(0, "end")
         self.tech_name_entry.insert(0, tech.get("name", ""))
+        self.tech_desc_text.delete("1.0", "end")
+        self.tech_desc_text.insert("1.0", tech.get("description", ""))
         self.tech_cost_entry.delete(0, "end")
         self.tech_cost_entry.insert(0, str(tech.get("cost", 0)))
 
@@ -908,6 +911,7 @@ class PackEditorApp:
             "branch": self.tech_branch_entry.get().strip(),
             "tier": parse_int(self.tech_tier_entry.get(), 1),
             "name": self.tech_name_entry.get().strip(),
+            "description": self.tech_desc_text.get("1.0", "end-1c"),
             "cost": parse_int(self.tech_cost_entry.get()),
             "prerequisites": [
                 tech_id for tech_id, var in self.tech_prereq_vars.items() if var.get()
