@@ -80,9 +80,10 @@ async def lifespan(app: FastAPI):
             BotCommand(command="research", description="Технологии (ЛС)"),
             BotCommand(command="regions", description="Регионы (ЛС)"),
             BotCommand(command="event", description="Голосование (ЛС)"),
-            BotCommand(command="confirm", description="Готов (ЛС)"),
+            BotCommand(command="role", description="Выбор роли (ЛС)"),
             BotCommand(command="cancel", description="Сбросить заявки (ЛС)"),
             BotCommand(command="loy", description="Личная карточка (ЛС)"),
+            BotCommand(command="map", description="Карта Тарбина"),
             BotCommand(command="help", description="Помощь"),
         ]
     )

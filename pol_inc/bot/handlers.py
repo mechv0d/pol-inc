@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -18,7 +19,12 @@ from pol_inc.application.tarbin_sessions import TarbinSessionManager
 from pol_inc.config import Settings
 from pol_inc.domain.enums import SessionStatus
 from pol_inc.domain.errors import ActionError, PolIncError
-from pol_inc.domain.tarbin_game import PRIORITY_DIRECTIONS
+from pol_inc.domain.tarbin_game import (
+    PRIORITY_DIRECTIONS,
+    action_summary,
+    role_category,
+    slots_for_role,
+)
 
 from .formatting import (
     PRIORITY_RU,
@@ -27,13 +33,17 @@ from .formatting import (
     format_event_menu,
     format_final,
     format_help,
+    format_hints,
     format_lobby,
     format_loy,
     format_pack_list,
     format_regions,
+    format_regions_help,
     format_report,
+    format_research_details,
     format_research_menu,
     format_roles_menu,
+    format_roles_pick,
     format_status,
 )
 
@@ -43,6 +53,7 @@ router = Router(name="commands")
 
 GROUP_TYPES = {"group", "supergroup"}
 MESSAGE_CHUNK_LIMIT = 4000
+MAP_ASSET = Path(__file__).resolve().parent.parent / "assets" / "map_tarbin.jpg"
 
 
 def _chunk_lines(lines: list[str], limit: int = MESSAGE_CHUNK_LIMIT) -> list[str]:
@@ -227,6 +238,23 @@ async def _send_briefing(
     )
 
 
+async def _send_map(bot: Bot, chat_id: int, caption: str = "🗺 Карта Тарбина") -> None:
+    if MAP_ASSET.is_file():
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=BufferedInputFile(
+                    MAP_ASSET.read_bytes(), filename="map_tarbin.jpg"
+                ),
+                caption=caption,
+            )
+            return
+        except Exception:
+            logger.exception("Не удалось отправить карту")
+
+    await bot.send_message(chat_id=chat_id, text=caption)
+
+
 async def _announce_report(
     bot: Bot,
     pack_service: TarbinPackService,
@@ -239,6 +267,16 @@ async def _announce_report(
     await send_lines(bot, session.chat_id, format_report(report, session.pack))
     if report.result:
         await send_lines(bot, session.chat_id, format_final(session, report))
+    else:
+        await bot.send_message(
+            chat_id=session.chat_id,
+            text="Нажмите «Далее», когда штаб будет готов к новому ходу.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⏭ Далее", callback_data="menu:next")]
+                ]
+            ),
+        )
 
 
 async def _maybe_resolve_and_announce(
@@ -253,9 +291,42 @@ async def _maybe_resolve_and_announce(
         return False
 
     await _announce_report(bot, pack_service, fresh, report)
-    if not report.result:
-        await _send_briefing(bot, fresh, pack_service)
     return True
+
+
+async def _delete_user_menus(
+    bot: Bot,
+    session,
+    user_ids: list[int] | None = None,
+) -> None:
+    targets = user_ids if user_ids is not None else list(session.menu_message_ids)
+    for user_id in targets:
+        message_id = session.menu_message_ids.pop(user_id, None)
+        if message_id is None:
+            continue
+        try:
+            await bot.delete_message(chat_id=user_id, message_id=message_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("Не удалось удалить старое меню %s", user_id)
+
+    if user_ids is None:
+        session.menu_message_ids = {}
+
+
+async def _advance_and_brief(
+    bot: Bot,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    session,
+) -> None:
+    try:
+        fresh = await session_manager.advance_turn(session.chat_id)
+    except ActionError as exc:
+        await bot.send_message(chat_id=session.chat_id, text=f"{esc(exc)}")
+        return
+
+    await _delete_user_menus(bot, fresh)
+    await _send_briefing(bot, fresh, pack_service)
 
 
 def _is_commander(session, user_id: int) -> bool:
@@ -277,6 +348,15 @@ def _role_short(session, role_id: str) -> str:
     return role_id
 
 
+def _remaining_label(session, role_id: str) -> str:
+    state = session.state
+    pack = session.pack
+    if state is None or pack is None:
+        return ""
+    left = slots_for_role(pack, state) - len(state.submissions.get(role_id, []))
+    return f" ({left} ост.)" if left > 0 else " ✅"
+
+
 def _main_menu_kb(session, user_id: int) -> InlineKeyboardMarkup:
     roles = session.roles_of(user_id)
     rows: list[list[InlineKeyboardButton]] = []
@@ -284,7 +364,7 @@ def _main_menu_kb(session, user_id: int) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"🎬 {_role_short(session, role_id)}",
+                    text=f"{role_category(role_id)} {_role_short(session, role_id)}{_remaining_label(session, role_id)}",
                     callback_data=f"menu:role:{role_id}",
                 )
             ]
@@ -312,11 +392,30 @@ def _main_menu_kb(session, user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🛰 Разведка", callback_data="menu:intel")]
         )
     if _is_commander(session, user_id):
-        rows.append(
-            [InlineKeyboardButton(text="🧭 Приоритет", callback_data="menu:prio")]
+        prio_mark = (
+            " ❗"
+            if session.state is not None and session.state.priority is None
+            else ""
         )
-    rows.append([InlineKeyboardButton(text="✅ Готов", callback_data="menu:ready")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🧭 Приоритет{prio_mark}", callback_data="menu:prio"
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="💡 Подсказка", callback_data="menu:hint")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_menu(bot: Bot, session, user_id: int, chat_id: int) -> None:
+    await _delete_user_menus(bot, session, [user_id])
+    message = await bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(format_roles_menu(session, user_id)),
+        reply_markup=_main_menu_kb(session, user_id),
+    )
+    session.menu_message_ids[user_id] = message.message_id
 
 
 def _back_kb() -> InlineKeyboardMarkup:
@@ -341,6 +440,7 @@ async def _refresh_main_menu(callback: CallbackQuery, session, user_id: int) -> 
             "\n".join(format_roles_menu(session, user_id)),
             reply_markup=_main_menu_kb(session, user_id),
         )
+        session.menu_message_ids[user_id] = message.message_id
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc):
             logger.warning("Не удалось обновить меню: %s", exc)
@@ -457,6 +557,7 @@ async def join(
 async def leavegame(
     message: Message,
     session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
     bot: Bot,
 ) -> None:
     if message.from_user is None:
@@ -476,9 +577,13 @@ async def leavegame(
         return
 
     if result.vacated_roles:
-        await message.answer(
-            f"Вы покинули операцию. Роли вакантны: {esc(', '.join(result.vacated_roles))}."
+        names = ", ".join(
+            _role_short(result.session, role_id)
+            if result.session is not None
+            else role_id
+            for role_id in result.vacated_roles
         )
+        await message.answer(f"Вы покинули операцию. Роли вакантны: {esc(names)}.")
     else:
         await message.answer("Вы покинули операцию.")
 
@@ -487,6 +592,8 @@ async def leavegame(
         await send_lines(bot, target, format_report(result.report, result.session.pack))
         if result.report.result:
             await send_lines(bot, target, format_final(result.session, result.report))
+        else:
+            await _send_briefing(bot, result.session, pack_service)
     elif result.session is not None and result.session.status == SessionStatus.NEW:
         await send_or_update_lobby(bot, session_manager, result.session)
 
@@ -685,6 +792,28 @@ async def status(
     await send_lines(bot, message.chat.id, format_status(session))
 
 
+@router.message(Command("map"))
+async def world_map(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if message.chat.type in GROUP_TYPES:
+        session = session_manager.get_by_chat(message.chat.id)
+        if session is None:
+            await message.answer("В этом чате нет операции.")
+            return
+    elif message.from_user is not None:
+        session = session_manager.get_by_user(message.from_user.id)
+        if session is None:
+            await message.answer("Вы не участвуете в операции.")
+            return
+    else:
+        return
+
+    await _send_map(bot, message.chat.id)
+
+
 @router.message(Command("help"))
 async def help_cmd(message: Message, bot: Bot) -> None:
     await send_lines(bot, message.chat.id, format_help())
@@ -717,11 +846,7 @@ async def menu(
         await message.answer("Игра ещё не запущена. Дождитесь /startgame в группе.")
         return
 
-    await bot.send_message(
-        chat_id=message.chat.id,
-        text="\n".join(format_roles_menu(session, message.from_user.id)),
-        reply_markup=_main_menu_kb(session, message.from_user.id),
-    )
+    await _send_menu(bot, session, message.from_user.id, message.chat.id)
 
 
 @router.message(Command("actions"))
@@ -762,19 +887,32 @@ async def actions(
 
     lines = ["<b>Ваши действия на этом ходу:</b>", ""]
     for role_id in roles:
-        lines.append(f"<b>{esc(_role_short(session, role_id))}:</b>")
+        lines.append(
+            f"<b>{role_category(role_id)} {esc(_role_short(session, role_id))}:</b>"
+        )
+        if session.state is not None and session.pack is not None:
+            left = slots_for_role(session.pack, session.state) - len(
+                session.state.submissions.get(role_id, [])
+            )
+            lines.append(f"Осталось действий: {max(0, left)}.")
         options = session_manager.action_options(session, role_id)
         if not options:
             lines.append("- нет доступных действий")
         for opt in options:
+            action = (
+                session.pack.action_by_id(opt.action_id)
+                if session.pack is not None
+                else None
+            )
+            summary = action_summary(action) if action is not None else ""
+            summary_text = f" ({summary})" if summary else ""
             if opt.locked_reason:
                 lines.append(
-                    f"🔒 {esc(opt.name)} — {opt.cost} млн ({esc(opt.locked_reason)})"
+                    f"🔒 {esc(opt.name)} — {opt.cost} млн{esc(summary_text)} "
+                    f"({esc(opt.locked_reason)})"
                 )
             else:
-                lines.append(
-                    f"- {esc(opt.name)} (<code>{esc(opt.action_id)}</code>) — {opt.cost} млн"
-                )
+                lines.append(f"- {esc(opt.name)} — {opt.cost} млн{esc(summary_text)}")
         lines.append("")
     lines.append("Выберите действие через /menu.")
     await send_lines(bot, message.chat.id, lines)
@@ -800,7 +938,15 @@ async def research(
         await message.answer("Игра ещё не запущена.")
         return
 
-    await send_lines(bot, message.chat.id, format_research_menu(session))
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text="\n".join(format_research_menu(session)),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Подробнее", callback_data="menu:resfull")]
+            ]
+        ),
+    )
 
 
 @router.message(Command("regions"))
@@ -824,7 +970,34 @@ async def regions(
         return
 
     show_hideouts = _can_intel(session, message.from_user.id)
-    await send_lines(bot, message.chat.id, format_regions(session, show_hideouts))
+    await _send_map(bot, message.chat.id)
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text="\n".join(format_regions(session, show_hideouts)),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📖 Инструкция", callback_data="menu:regions_help"
+                    )
+                ]
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data == "menu:regions_help")
+async def cb_regions_help(callback: CallbackQuery) -> None:
+    try:
+        message = _cb_message(callback)
+        if message is None:
+            return
+        await callback.answer()
+        await message.edit_text(
+            "\n".join(format_regions_help()), reply_markup=_back_kb()
+        )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
 
 
 @router.message(Command("event"))
@@ -871,30 +1044,6 @@ async def event(
     )
 
 
-@router.message(Command("confirm"))
-async def confirm(
-    message: Message,
-    session_manager: TarbinSessionManager,
-    pack_service: TarbinPackService,
-    bot: Bot,
-) -> None:
-    if not _require_private(message):
-        await message.answer("Подтверждение — в личных сообщениях бота.")
-        return
-    if message.from_user is None:
-        return
-
-    session = _user_session(session_manager, message.from_user.id)
-    if session is None:
-        await message.answer("Вы не участвуете в операции.")
-        return
-
-    should_resolve = await session_manager.confirm(message.from_user.id)
-    await message.answer("Готов! ✅ Ждём остальных членов штаба.")
-    if should_resolve:
-        await _maybe_resolve_and_announce(bot, session_manager, pack_service, session)
-
-
 @router.message(Command("cancel"))
 async def cancel(
     message: Message,
@@ -928,6 +1077,86 @@ async def loy(
         return
 
     await send_lines(bot, message.chat.id, format_loy(session, message.from_user.id))
+
+
+@router.message(Command("role"))
+async def role(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if message.chat.type in GROUP_TYPES:
+        await message.answer("Роли выбираются в личных сообщениях бота.")
+        return
+    if message.from_user is None:
+        return
+
+    session = _user_session(session_manager, message.from_user.id)
+    if session is None:
+        await message.answer("Вы не участвуете в операции.")
+        return
+    if session.status != SessionStatus.NEW:
+        await message.answer("Роли выбираются до старта игры.")
+        return
+
+    await _send_role_pick(bot, session_manager, session, message.from_user.id)
+
+
+async def _send_role_pick(bot: Bot, session_manager, session, user_id: int) -> None:
+    await bot.send_message(
+        chat_id=user_id,
+        text="\n".join(format_roles_pick(session)),
+        reply_markup=_role_pick_kb(session, user_id),
+    )
+
+
+def _role_pick_kb(session, user_id: int) -> InlineKeyboardMarkup:
+    pack = session.pack
+    roles = [role.id for role in pack.roles] if pack is not None else []
+    rows: list[list[InlineKeyboardButton]] = []
+    taken = {}
+    for player in session.players.values():
+        for role_id in player.role_ids:
+            taken[role_id] = player.user_id
+    for role_id in roles:
+        mark = " ✅" if taken.get(role_id) == user_id else ""
+        busy = " 🔒" if role_id in taken and taken[role_id] != user_id else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{role_category(role_id)} {_role_short(session, role_id)}{mark}{busy}",
+                    callback_data=f"menu:rolepick:{role_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("menu:rolepick:"))
+async def cb_rolepick(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3:
+            return
+        role_id = parts[2]
+        session, picked = await session_manager.pick_role(
+            callback.from_user.id, role_id
+        )
+        await callback.answer("Роль выбрана ✅" if picked else "Выбор роли снят.")
+        await message.edit_text(
+            "\n".join(format_roles_pick(session)),
+            reply_markup=_role_pick_kb(session, callback.from_user.id),
+        )
+        await send_or_update_lobby(bot, session_manager, session)
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
 
 
 # ---------- Callback'и ----------
@@ -974,12 +1203,31 @@ async def cb_role(
             return
         role_id = parts[2]
         options = session_manager.action_options(session, role_id)
-        lines = [f"<b>{esc(_role_short(session, role_id))}. Выберите действие:</b>", ""]
+        role = session.pack.role_by_id(role_id) if session.pack is not None else None
+        header = f"<b>{role_category(role_id)} {esc(_role_short(session, role_id))}</b>"
+        lines = [header]
+        if role is not None and role.description:
+            lines.append(f"<i>{esc(role.description)}</i>")
+        state = session.state
+        if state is not None and session.pack is not None:
+            left = slots_for_role(session.pack, state) - len(
+                state.submissions.get(role_id, [])
+            )
+            lines.append(f"Осталось действий: {max(0, left)}.")
+        lines.extend(["", "Выберите действие:", ""])
         rows: list[list[InlineKeyboardButton]] = []
         for opt in options:
+            action = (
+                session.pack.action_by_id(opt.action_id)
+                if session.pack is not None
+                else None
+            )
+            summary = action_summary(action) if action is not None else ""
+            summary_text = f" ({summary})" if summary else ""
             if opt.locked_reason:
                 lines.append(
-                    f"🔒 {esc(opt.name)} — {opt.cost} млн ({esc(opt.locked_reason)})"
+                    f"🔒 {esc(opt.name)} — {opt.cost} млн{esc(summary_text)} "
+                    f"({esc(opt.locked_reason)})"
                 )
                 rows.append(
                     [
@@ -990,7 +1238,7 @@ async def cb_role(
                     ]
                 )
             else:
-                lines.append(f"- {esc(opt.name)} — {opt.cost} млн")
+                lines.append(f"- {esc(opt.name)} — {opt.cost} млн{esc(summary_text)}")
                 rows.append(
                     [
                         InlineKeyboardButton(
@@ -1118,26 +1366,51 @@ async def cb_res(
         rows: list[list[InlineKeyboardButton]] = []
         for opt in options:
             if opt.locked_reason:
-                rows.append(
-                    [
-                        InlineKeyboardButton(
-                            text=f"🔒 {opt.name}",
-                            callback_data="noop",
-                        )
-                    ]
-                )
-            else:
-                rows.append(
-                    [
-                        InlineKeyboardButton(
-                            text=f"{opt.name} ({opt.cost} млн)",
-                            callback_data=f"menu:tech:{role_id}:{opt.tech_id}",
-                        )
-                    ]
-                )
+                continue
+            tech = (
+                session.pack.tech_by_id(opt.tech_id)
+                if session.pack is not None
+                else None
+            )
+            desc = f" — {tech.description}" if tech and tech.description else ""
+            lines.append(f"- {esc(opt.name)} — {opt.cost} млн{esc(desc)}")
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{opt.name} ({opt.cost} млн)",
+                        callback_data=f"menu:tech:{role_id}:{opt.tech_id}",
+                    )
+                ]
+            )
+        if not rows:
+            lines.append("Доступных технологий нет.")
+        rows.append(
+            [InlineKeyboardButton(text="Подробнее", callback_data="menu:resfull")]
+        )
         rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
         await message.edit_text(
             "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data == "menu:resfull")
+async def cb_resfull(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        await callback.answer()
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None or session.state is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        await message.edit_text(
+            "\n".join(format_research_details(session)), reply_markup=_back_kb()
         )
     except PolIncError as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -1218,6 +1491,7 @@ async def cb_event(
 async def cb_vote(
     callback: CallbackQuery,
     session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
     bot: Bot,
 ) -> None:
     try:
@@ -1232,36 +1506,58 @@ async def cb_vote(
         if session is None:
             await callback.answer("Нет активной игры.", show_alert=True)
             return
-        await session_manager.vote_event(callback.from_user.id, option_id)
+        should_resolve = await session_manager.vote_event(
+            callback.from_user.id, option_id
+        )
         await callback.answer(f"Голос принят: {option_id}")
         await _refresh_main_menu(callback, session, callback.from_user.id)
+        if should_resolve:
+            await _maybe_resolve_and_announce(
+                bot, session_manager, pack_service, session
+            )
     except PolIncError as exc:
         await callback.answer(str(exc), show_alert=True)
 
 
-@router.callback_query(F.data == "menu:ready")
-async def cb_ready(
+@router.callback_query(F.data == "menu:next")
+async def cb_next(
     callback: CallbackQuery,
     session_manager: TarbinSessionManager,
     pack_service: TarbinPackService,
     bot: Bot,
 ) -> None:
     try:
-        message = _cb_message(callback)
-        if callback.from_user is None or message is None:
+        if callback.from_user is None:
             return
         session = _user_session(session_manager, callback.from_user.id)
         if session is None:
             await callback.answer("Нет активной игры.", show_alert=True)
             return
-        should_resolve = await session_manager.confirm(callback.from_user.id)
-        await callback.answer("Готов! ✅")
-        if should_resolve:
-            await _maybe_resolve_and_announce(
-                bot, session_manager, pack_service, session
-            )
-        else:
-            await _refresh_main_menu(callback, session, callback.from_user.id)
+        ready = await session_manager.confirm_next(callback.from_user.id)
+        await callback.answer("Принято ✅")
+        if ready:
+            await _advance_and_brief(bot, session_manager, pack_service, session)
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data == "menu:hint")
+async def cb_hint(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        await callback.answer()
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None or session.state is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        await message.edit_text(
+            "\n".join(format_hints(session)), reply_markup=_back_kb()
+        )
     except PolIncError as exc:
         await callback.answer(str(exc), show_alert=True)
 
@@ -1283,11 +1579,11 @@ async def cb_intel(
         intentions, regions, hideouts = session_manager.intel_brief(session)
         lines = ["<b>🛰 Сводка разведки:</b>", ""]
         if intentions:
-            lines.append("<b>Намерения Al Nazra:</b>")
+            lines.append("<b>Намерения Аль Назра:</b>")
             for item in intentions:
                 lines.append(f"- {esc(item)}")
         else:
-            lines.append("Намерения Al Nazra пока не раскрыты.")
+            lines.append("Намерения Аль Назра пока не раскрыты.")
         lines.append("")
         if regions:
             lines.append(f"Разведанные регионы: {esc(', '.join(regions))}")
