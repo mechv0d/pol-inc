@@ -7,18 +7,16 @@ from contextlib import asynccontextmanager, suppress
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, Update
 from fastapi import FastAPI, HTTPException, Request
 
-from pol_inc.application.packs import PackService
-from pol_inc.application.parties import PartyRepository
-from pol_inc.application.sessions import SessionManager
+from pol_inc.application.tarbin_packs import TarbinPackService
+from pol_inc.application.tarbin_sessions import TarbinSessionManager
 from pol_inc.config import get_settings
 from pol_inc.infrastructure.supabase import SupabaseStorageClient
 
 from .dp import create_dispatcher
-
-from aiogram.fsm.storage.memory import MemoryStorage
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +25,7 @@ settings = get_settings()
 logging.basicConfig(level=settings.log_level)
 
 
-async def cleanup_sessions(bot: Bot, session_manager: SessionManager) -> None:
+async def cleanup_sessions(bot: Bot, session_manager: TarbinSessionManager) -> None:
     while True:
         await asyncio.sleep(300)
 
@@ -47,9 +45,8 @@ async def cleanup_sessions(bot: Bot, session_manager: SessionManager) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     storage = SupabaseStorageClient(settings)
-    pack_service = PackService(storage=storage, settings=settings)
-    party_repo = PartyRepository(storage=storage)
-    session_manager = SessionManager(settings=settings, party_repo=party_repo)
+    pack_service = TarbinPackService(storage=storage, settings=settings)
+    session_manager = TarbinSessionManager(settings=settings)
 
     bot = Bot(
         token=settings.bot_token,
@@ -61,7 +58,6 @@ async def lifespan(app: FastAPI):
         settings=settings,
         session_manager=session_manager,
         pack_service=pack_service,
-        party_repo=party_repo,
     )
 
     app.state.bot = bot
@@ -70,17 +66,24 @@ async def lifespan(app: FastAPI):
 
     await bot.set_my_commands(
         [
-            BotCommand(command="game", description="Сессия и паки"),
-            BotCommand(command="newgame", description="Создать игру"),
-            BotCommand(command="join", description="Присоединиться к игре"),
-            BotCommand(command="leavegame", description="Покинуть игру"),
-            BotCommand(command="closegame", description="Закрыть игру"),
-            BotCommand(command="ss", description="Настройки сессии"),
-            BotCommand(command="reg", description="Регистрация партии в ЛС"),
-            BotCommand(command="parties", description="Список партий"),
+            BotCommand(command="game", description="Лобби или статус игры"),
+            BotCommand(command="newgame", description="Создать операцию"),
+            BotCommand(command="join", description="Присоединиться к операции"),
+            BotCommand(command="leavegame", description="Покинуть операцию"),
+            BotCommand(command="operation", description="Название операции"),
             BotCommand(command="startgame", description="Запустить игру"),
-            BotCommand(command="vote", description="Тайный выбор фракции в ЛС"),
-            BotCommand(command="cancel", description="Отменить регистрацию партии"),
+            BotCommand(command="closegame", description="Закрыть операцию"),
+            BotCommand(command="ss", description="Параметры сессии"),
+            BotCommand(command="status", description="Снимок состояния"),
+            BotCommand(command="menu", description="Меню штаба (ЛС)"),
+            BotCommand(command="actions", description="Действия ролей (ЛС)"),
+            BotCommand(command="research", description="Технологии (ЛС)"),
+            BotCommand(command="regions", description="Регионы (ЛС)"),
+            BotCommand(command="event", description="Голосование (ЛС)"),
+            BotCommand(command="confirm", description="Готов (ЛС)"),
+            BotCommand(command="cancel", description="Сбросить заявки (ЛС)"),
+            BotCommand(command="loy", description="Личная карточка (ЛС)"),
+            BotCommand(command="help", description="Помощь"),
         ]
     )
 

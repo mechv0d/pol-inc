@@ -5,8 +5,6 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -15,24 +13,28 @@ from aiogram.types import (
     Message,
 )
 
-from pol_inc.application.packs import PackService
-from pol_inc.application.parties import PartyRepository
-from pol_inc.application.sessions import SessionManager
+from pol_inc.application.tarbin_packs import TarbinPackService
+from pol_inc.application.tarbin_sessions import TarbinSessionManager
 from pol_inc.config import Settings
 from pol_inc.domain.enums import SessionStatus
-from pol_inc.domain.errors import PackError, PolIncError
-from pol_inc.domain.session import Party
+from pol_inc.domain.errors import ActionError, PolIncError
+from pol_inc.domain.tarbin_game import PRIORITY_DIRECTIONS
 
 from .formatting import (
+    PRIORITY_RU,
     esc,
+    format_briefing,
+    format_event_menu,
     format_final,
+    format_help,
     format_lobby,
+    format_loy,
     format_pack_list,
-    format_party_card,
-    format_resolution,
-    format_session,
-    format_turn,
-    format_welcome,
+    format_regions,
+    format_report,
+    format_research_menu,
+    format_roles_menu,
+    format_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,28 +43,6 @@ router = Router(name="commands")
 
 GROUP_TYPES = {"group", "supergroup"}
 MESSAGE_CHUNK_LIMIT = 4000
-
-
-class RegStates(StatesGroup):
-    name = State()
-    slogan = State()
-    ideology = State()
-    line = State()
-    photo = State()
-
-
-SKIP_PHOTO_CALLBACK = "reg:skip_photo"
-VOTE_CALLBACK_PREFIX = "vote:"
-ABILITIES_CALLBACK = "abilities"
-PARTY_CAPTION_LIMIT = 1024
-
-
-def _skip_photo_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Пропустить", callback_data=SKIP_PHOTO_CALLBACK)]
-        ]
-    )
 
 
 def _chunk_lines(lines: list[str], limit: int = MESSAGE_CHUNK_LIMIT) -> list[str]:
@@ -84,7 +64,7 @@ def _chunk_lines(lines: list[str], limit: int = MESSAGE_CHUNK_LIMIT) -> list[str
             continue
 
         for index in range(0, len(line), limit):
-            chunks.append(line[index:index + limit])
+            chunks.append(line[index : index + limit])
 
         current = ""
 
@@ -99,18 +79,63 @@ async def send_lines(bot: Bot, chat_id: int, lines: list[str]) -> None:
         await bot.send_message(chat_id=chat_id, text=chunk)
 
 
+async def send_pack_photo(
+    bot: Bot,
+    chat_id: int,
+    pack_service: TarbinPackService,
+    object_name: str | None,
+    **kwargs,
+) -> Message | None:
+    """Отправляет изображение из бакета пака. Никогда не бросает исключений."""
+    if not object_name:
+        return None
+
+    url = None
+    try:
+        url = pack_service.image_url(object_name)
+    except Exception:  # noqa: BLE001
+        logger.warning("Не удалось построить URL для %s", object_name)
+        url = None
+
+    if url:
+        try:
+            return await bot.send_photo(chat_id=chat_id, photo=url, **kwargs)
+        except Exception:  # noqa: BLE001
+            logger.info(
+                "Прямая отправка %s не удалась, пробую через скачивание.",
+                object_name,
+            )
+
+    try:
+        data = await pack_service.get_image_bytes(object_name)
+    except Exception:
+        logger.exception("Не удалось скачать %s из хранилища", object_name)
+        return None
+
+    if not data:
+        return None
+
+    try:
+        filename = object_name.rsplit("/", 1)[-1] or "image.jpg"
+        return await bot.send_photo(
+            chat_id=chat_id,
+            photo=BufferedInputFile(data, filename=filename),
+            **kwargs,
+        )
+    except Exception:
+        logger.exception("Не удалось отправить %s в Telegram", object_name)
+        return None
+
+
 async def send_or_update_lobby(
     bot: Bot,
-    session_manager: SessionManager,
+    session_manager: TarbinSessionManager,
     session,
-    *,
-    repost_if_unchanged: bool = False,
 ) -> None:
     if session.status != SessionStatus.NEW:
         return
 
     text = "\n".join(format_lobby(session))
-
     if len(text) > 4096:
         text = text[:4000] + "\n..."
 
@@ -124,108 +149,26 @@ async def send_or_update_lobby(
             return
         except TelegramBadRequest as exc:
             if "message is not modified" in str(exc):
-                if not repost_if_unchanged:
-                    return
-
-                try:
-                    await bot.delete_message(
-                        chat_id=session.chat_id,
-                        message_id=session.lobby_message_id,
-                    )
-                except Exception:
-                    logger.debug("Не удалось удалить старое сообщение лобби.")
-                    return
-            else:
-                logger.warning("Не удалось отредактировать сообщение лобби: %s", exc)
+                return
+            logger.warning("Не удалось отредактировать лобби: %s", exc)
         except Exception:
-            logger.exception("Ошибка при редактировании сообщения лобби")
+            logger.exception("Ошибка при редактировании лобби")
 
-    message = await bot.send_message(chat_id=session.chat_id, text=text)
-    await session_manager.set_lobby_message_id(session.chat_id, message.message_id)
+    try:
+        message = await bot.send_message(chat_id=session.chat_id, text=text)
+    except Exception:
+        logger.exception("Не удалось отправить лобби")
+        return
 
-
-async def send_pack_photo(
-    bot: Bot,
-    chat_id: int,
-    pack_service: PackService,
-    object_name: str | None,
-    **kwargs,
-):
-    """Отправляет картинку из бакета пака.
-
-    Сначала пробует прямую отправку по публичной ссылке, а если Telegram
-    не смог скачать файл (приватный бакет и т.п.) — скачивает его сервером
-    через сервисный ключ и перезаливает. Возвращает сообщение или None.
-    Никогда не бросает исключения.
-    """
-    if object_name:
-        url = pack_service.image_url(object_name)
-
-        if url:
-            try:
-                return await bot.send_photo(chat_id=chat_id, photo=url, **kwargs)
-            except Exception:
-                logger.info(
-                    "Прямая отправка %s не удалась, пробую через скачивание.",
-                    object_name,
-                )
-
-        try:
-            data = await pack_service.get_image_bytes(object_name)
-        except Exception:
-            logger.exception("Не удалось скачать %s из Supabase", object_name)
-            return None
-
-        if data:
-            try:
-                filename = object_name.rsplit("/", 1)[-1] or "image.jpg"
-                return await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=BufferedInputFile(data, filename=filename),
-                    **kwargs,
-                )
-            except Exception:
-                logger.exception("Не удалось отправить %s в Telegram", object_name)
-                return None
-
-    return None
-
-
-async def send_info_banner(
-    bot: Bot,
-    chat_id: int,
-    pack_service: PackService,
-) -> int | None:
-    message = await send_pack_photo(
-        bot, chat_id, pack_service, "game_info.jpg", has_spoiler=True
-    )
-
-    if message is not None:
-        return message.message_id
-
-    await bot.send_message(chat_id=chat_id, text="📢 <b>Текущее событие</b>")
-    return None
-
-
-async def send_reg_banner(
-    bot: Bot,
-    chat_id: int,
-    pack_service: PackService,
-) -> int | None:
-    message = await send_pack_photo(
-        bot, chat_id, pack_service, "game_reg.jpg", has_spoiler=True
-    )
-
-    if message is not None:
-        return message.message_id
-
-    await bot.send_message(chat_id=chat_id, text="📋 <b>Регистрация партии</b>")
-    return None
+    try:
+        await session_manager.set_lobby_message_id(session.chat_id, message.message_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Не удалось сохранить lobby_message_id")
 
 
 async def try_set_default_pack(
-    session_manager: SessionManager,
-    pack_service: PackService,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
     settings: Settings,
     session,
 ):
@@ -235,7 +178,6 @@ async def try_set_default_pack(
     try:
         meta = await pack_service.get_meta(settings.default_pack_id)
         pack = await pack_service.load_pack(meta)
-
         return await session_manager.set_pack(
             chat_id=session.chat_id,
             user_id=session.creator_id,
@@ -247,301 +189,241 @@ async def try_set_default_pack(
         return session
 
 
-async def send_turn(
+def _current_event(session) -> tuple:
+    if session.pack is None or session.state is None:
+        return None, ""
+    for event in session.pack.events:
+        if event.id == session.state.event_id:
+            region_name = ""
+            region_id = session.state.event_region_id
+            if region_id and region_id in session.state.regions:
+                region_name = session.state.regions[region_id].name
+            return event, region_name
+    return None, ""
+
+
+def _find_outcome_banner(pack, outcome_id: str) -> str | None:
+    if pack is None or not outcome_id:
+        return None
+    for event in pack.events:
+        for option in event.options:
+            for outcome in option.outcomes:
+                if outcome.id == outcome_id and outcome.banner:
+                    return outcome.banner
+    return None
+
+
+async def _send_briefing(
     bot: Bot,
-    chat_id: int,
     session,
-    pack_service: PackService,
-    session_manager: SessionManager,
+    pack_service: TarbinPackService,
+    session_manager: TarbinSessionManager | None = None,
 ) -> None:
-    pack = session.pack
+    event, region_name = _current_event(session)
+    if event is not None and event.banner:
+        await send_pack_photo(bot, session.chat_id, pack_service, event.banner)
+    await send_lines(
+        bot, session.chat_id, format_briefing(session, session.pack, event, region_name)
+    )
 
-    if pack is None:
-        return
 
+async def _announce_report(
+    bot: Bot,
+    pack_service: TarbinPackService,
+    session,
+    report,
+) -> None:
+    banner = _find_outcome_banner(session.pack, report.outcome_id)
+    if banner:
+        await send_pack_photo(bot, session.chat_id, pack_service, banner)
+    await send_lines(bot, session.chat_id, format_report(report, session.pack))
+    if report.result:
+        await send_lines(bot, session.chat_id, format_final(session, report))
+
+
+async def _maybe_resolve_and_announce(
+    bot: Bot,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    session,
+) -> bool:
     try:
-        event = session.get_current_event(pack)
-    except PolIncError as exc:
-        logger.exception("Не удалось получить текущее событие")
-        await bot.send_message(chat_id=chat_id, text=f"Не удалось получить событие: {esc(exc)}")
+        fresh, report = await session_manager.resolve(session.chat_id)
+    except ActionError:
+        return False
+
+    await _announce_report(bot, pack_service, fresh, report)
+    if not report.result:
+        await _send_briefing(bot, fresh, pack_service)
+    return True
+
+
+def _is_commander(session, user_id: int) -> bool:
+    return session.role_owners.get("commander") == user_id
+
+
+def _can_intel(session, user_id: int) -> bool:
+    return (
+        session.role_owners.get("commander") == user_id
+        or session.role_owners.get("intel_chief") == user_id
+    )
+
+
+def _role_short(session, role_id: str) -> str:
+    if session.pack is not None:
+        role = session.pack.role_by_id(role_id)
+        if role is not None:
+            return role.short_name or role.name
+    return role_id
+
+
+def _main_menu_kb(session, user_id: int) -> InlineKeyboardMarkup:
+    roles = session.roles_of(user_id)
+    rows: list[list[InlineKeyboardButton]] = []
+    for role_id in roles:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🎬 {_role_short(session, role_id)}",
+                    callback_data=f"menu:role:{role_id}",
+                )
+            ]
+        )
+    for role_id in roles:
+        label = (
+            "🔬 Исследования"
+            if len(roles) == 1
+            else f"🔬 Исследования: {_role_short(session, role_id)}"
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"menu:res:{role_id}",
+                )
+            ]
+        )
+    if session.state is not None and session.state.event_id:
+        rows.append(
+            [InlineKeyboardButton(text="🗳 Событие", callback_data="menu:event")]
+        )
+    if _can_intel(session, user_id):
+        rows.append(
+            [InlineKeyboardButton(text="🛰 Разведка", callback_data="menu:intel")]
+        )
+    if _is_commander(session, user_id):
+        rows.append(
+            [InlineKeyboardButton(text="🧭 Приоритет", callback_data="menu:prio")]
+        )
+    rows.append([InlineKeyboardButton(text="✅ Готов", callback_data="menu:ready")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")]
+        ]
+    )
+
+
+def _cb_message(callback: CallbackQuery) -> Message | None:
+    message = callback.message
+    return message if isinstance(message, Message) else None
+
+
+async def _refresh_main_menu(callback: CallbackQuery, session, user_id: int) -> None:
+    message = _cb_message(callback)
+    if message is None:
         return
-
-    await send_pack_photo(bot, chat_id, pack_service, event.banner)
-
-    chunks = _chunk_lines(format_turn(session, pack, event))
-
-    if not chunks:
-        return
-
-    first = await bot.send_message(chat_id=chat_id, text=chunks[0])
-    await session_manager.set_turn_message_id(chat_id, first.message_id)
-
-    for chunk in chunks[1:]:
-        await bot.send_message(chat_id=chat_id, text=chunk)
-
-
-async def update_turn_message(bot: Bot, session) -> None:
-    if session.status != SessionStatus.IN_GAME:
-        return
-
-    if not session.turn_message_id:
-        return
-
-    pack = session.pack
-
-    if pack is None:
-        return
-
     try:
-        event = session.get_current_event(pack)
-    except PolIncError:
-        return
-
-    text = "\n".join(format_turn(session, pack, event))
-
-    if len(text) > 4096:
-        text = text[:4000] + "\n..."
-
-    try:
-        await bot.edit_message_text(
-            chat_id=session.chat_id,
-            message_id=session.turn_message_id,
-            text=text,
+        await message.edit_text(
+            "\n".join(format_roles_menu(session, user_id)),
+            reply_markup=_main_menu_kb(session, user_id),
         )
     except TelegramBadRequest as exc:
-        if "message is not modified" in str(exc):
-            return
-
-        logger.warning("Не удалось обновить сообщение хода: %s", exc)
+        if "message is not modified" not in str(exc):
+            logger.warning("Не удалось обновить меню: %s", exc)
     except Exception:
-        logger.exception("Ошибка при обновлении сообщения хода")
+        logger.exception("Ошибка при обновлении меню")
 
 
-async def send_resolution(
-    bot: Bot,
-    chat_id: int,
-    session,
-    resolution,
-    pack_service: PackService,
-) -> None:
-    await send_pack_photo(bot, chat_id, pack_service, resolution.outcome.banner)
+def _require_private(message: Message) -> bool:
+    return message.chat.type not in GROUP_TYPES
 
-    await send_lines(bot, chat_id, format_resolution(session, resolution))
+
+# ---------- /start ----------
 
 
 @router.message(CommandStart())
 async def start(message: Message) -> None:
     await message.answer(
-        "<b>POL Inc.</b> — политическая игра.\n"
-        "Групповые команды: /newgame, /join, /leavegame, /game, /parties, /ss, /startgame\n"
-        "Личные команды: /reg, /vote номер, /cancel"
+        "<b>TARBIN: Миротворческая миссия</b> — кооперативная штабная игра.\n"
+        "Создайте операцию в групповом чате: /newgame\n"
+        "Принимайте решения в личных сообщениях: /menu\n"
+        "Помощь: /help"
     )
 
 
-@router.message(Command("game"))
-async def game(
-    message: Message,
-    session_manager: SessionManager,
-    pack_service: PackService,
-    bot: Bot,
-) -> None:
-    if message.chat.type in GROUP_TYPES:
-        session = session_manager.get_by_chat(message.chat.id)
-
-        if session is not None:
-            if session.status == SessionStatus.NEW:
-                if session.info_banner_message_id is None:
-                    banner_id = await send_info_banner(bot, message.chat.id, pack_service)
-
-                    if banner_id is not None:
-                        await session_manager.set_info_banner_message_id(
-                            message.chat.id,
-                            banner_id,
-                        )
-
-                await send_or_update_lobby(
-                    bot, session_manager, session, repost_if_unchanged=True
-                )
-            else:
-                await send_lines(bot, message.chat.id, format_session(session))
-
-            return
-
-    lines = ["<b>POL Inc.</b>"]
-
-    session = None
-
-    if message.chat.type in GROUP_TYPES:
-        session = session_manager.get_by_chat(message.chat.id)
-    elif message.from_user is not None:
-        session = session_manager.get_by_user(message.from_user.id)
-
-    if session:
-        lines.append("")
-        lines.extend(format_session(session))
-    elif message.chat.type in GROUP_TYPES:
-        lines.append("В этом чате нет сессии. Создать: /newgame")
-    else:
-        lines.append("Вы не участвуете в сессии.")
-
-    try:
-        metas = await pack_service.list_metas()
-    except PackError as exc:
-        lines.append("")
-        lines.append(f"Список паков недоступен: {esc(exc)}")
-    else:
-        lines.append("")
-        lines.extend(format_pack_list(metas))
-
-    await send_lines(bot, message.chat.id, lines)
+# ---------- Групповые команды ----------
 
 
-async def send_party_card(
+async def send_pack_list(
     bot: Bot,
     chat_id: int,
-    party_repo: PartyRepository,
-    party,
-    president_name: str,
-    is_creator: bool = False,
-    percent: int | None = None,
-    influence: int | None = None,
+    pack_service: TarbinPackService,
 ) -> None:
-    caption = format_party_card(
-        party,
-        president_name,
-        is_creator=is_creator,
-        percent=percent,
-        influence=influence,
-    )
-
-    photo_bytes: bytes | None = None
-    if party.photo_object:
-        try:
-            photo_bytes = await party_repo.get_photo(party.photo_object)
-        except Exception:
-            logger.warning("Не удалось загрузить фото партии %s", party.photo_object)
-            photo_bytes = None
-
-    if photo_bytes is not None:
-        photo = BufferedInputFile(photo_bytes, filename="party.jpg")
-
-        if len(caption) <= PARTY_CAPTION_LIMIT:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
-            return
-
-        await send_lines(bot, chat_id, [caption])
-        await bot.send_photo(
-            chat_id=chat_id, photo=photo, caption=f"🎖 <b>{esc(party.name)}</b>"
-        )
-        return
-
-    await send_lines(bot, chat_id, [caption])
-
-
-@router.message(Command("parties"))
-async def parties(
-    message: Message,
-    session_manager: SessionManager,
-    party_repo: PartyRepository,
-    bot: Bot,
-) -> None:
-    session = None
-    if message.chat.type in GROUP_TYPES:
-        session = session_manager.get_by_chat(message.chat.id)
-
-    if session is not None:
-        registered = [
-            player for player in session.players.values() if player.party is not None
-        ]
-
-        if not registered:
-            await message.answer("В этой сессии пока нет зарегистрированных партий.")
-            return
-
-        in_game = session.status == SessionStatus.IN_GAME
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text=f"<b>Партии сессии <code>{esc(session.code)}</code>:</b>",
-        )
-
-        for player in registered:
-            assert player.party is not None
-            await send_party_card(
-                bot,
-                message.chat.id,
-                party_repo,
-                player.party,
-                player.public_name,
-                is_creator=player.user_id == session.creator_id,
-                percent=player.percent if in_game else None,
-                influence=player.influence if in_game else None,
-            )
-        return
-
-    if message.from_user is None:
-        return
-
     try:
-        party = await session_manager.get_persisted_party(message.from_user.id)
-    except Exception:
-        party = None
-
-    if party is None:
-        await message.answer(
-            "У вас пока нет партии. Зарегистрируйте её в личных сообщениях бота: /reg"
-        )
+        metas = await pack_service.list_metas()
+    except PolIncError as exc:
+        await send_lines(bot, chat_id, [f"Список паков недоступен: {esc(exc)}"])
         return
 
-    await send_party_card(
-        bot,
-        message.chat.id,
-        party_repo,
-        party,
-        message.from_user.full_name,
-    )
+    await send_lines(bot, chat_id, format_pack_list(metas))
 
 
 @router.message(Command("newgame"))
 async def newgame(
     message: Message,
-    session_manager: SessionManager,
-    pack_service: PackService,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
     settings: Settings,
     bot: Bot,
 ) -> None:
     if message.chat.type not in GROUP_TYPES:
-        await message.answer("Игра создаётся в групповом чате.")
+        await message.answer("Операция создаётся в групповом чате.")
         return
-
     if message.from_user is None:
         return
 
-    try:
-        session = await session_manager.create(
-            chat_id=message.chat.id,
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            display_name=message.from_user.full_name,
-        )
-    except PolIncError as exc:
-        await message.answer(f"Не удалось создать сессию: {esc(exc)}")
-        return
-
-    session = await try_set_default_pack(session_manager, pack_service, settings, session)
+    session = await session_manager.create(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        display_name=message.from_user.full_name,
+    )
+    session = await try_set_default_pack(
+        session_manager, pack_service, settings, session
+    )
     await send_or_update_lobby(bot, session_manager, session)
+    if session.pack is not None and session.pack.assets.cover:
+        await send_pack_photo(
+            bot, message.chat.id, pack_service, session.pack.assets.cover
+        )
+    if session.pack is None:
+        await send_pack_list(bot, message.chat.id, pack_service)
 
 
 @router.message(Command("join"))
 async def join(
     message: Message,
     command: CommandObject,
-    session_manager: SessionManager,
+    session_manager: TarbinSessionManager,
     bot: Bot,
 ) -> None:
     if message.chat.type not in GROUP_TYPES:
-        await message.answer("Присоединяться к игре нужно в групповом чате.")
+        await message.answer("Присоединяться к операции нужно в групповом чате.")
         return
-
     if message.from_user is None:
         return
 
@@ -549,37 +431,24 @@ async def join(
         code = command.args.strip().upper()
     else:
         session = session_manager.get_by_chat(message.chat.id)
-
         if session is None:
-            await message.answer("В этом чате нет сессии. Создать: /newgame")
+            await message.answer("В этом чате нет операции. Создать: /newgame")
             return
-
         code = session.code
 
-    try:
-        result = await session_manager.join(
-            code=code,
-            chat_id=message.chat.id,
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            display_name=message.from_user.full_name,
-        )
-    except PolIncError as exc:
-        await message.answer(f"Не удалось присоединиться: {esc(exc)}")
-        return
-
+    result = await session_manager.join(
+        code=code,
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        display_name=message.from_user.full_name,
+    )
     if result.already_joined:
-        await message.answer("Вы уже в этой сессии.")
+        await message.answer("Вы уже в этой операции.")
     else:
-        message_text = f"Игрок присоединился к сессии <code>{esc(result.session.code)}</code>."
-        try:
-            persisted = await session_manager.get_persisted_party(message.from_user.id)
-        except Exception:
-            persisted = None
-        if persisted is not None:
-            message_text += f"\nВаша партия «{esc(persisted.name)}» автоматически применена."
-        await message.answer(message_text)
-
+        await message.answer(
+            f"Вы присоединились к операции <code>{esc(result.session.code)}</code>."
+        )
     if result.session.status == SessionStatus.NEW:
         await send_or_update_lobby(bot, session_manager, result.session)
 
@@ -587,704 +456,901 @@ async def join(
 @router.message(Command("leavegame"))
 async def leavegame(
     message: Message,
-    session_manager: SessionManager,
-    pack_service: PackService,
+    session_manager: TarbinSessionManager,
     bot: Bot,
 ) -> None:
     if message.from_user is None:
         return
 
-    try:
-        result = await session_manager.leave(message.from_user.id)
-    except PolIncError as exc:
-        await message.answer(f"Не удалось выйти из сессии: {esc(exc)}")
-        return
+    result = await session_manager.leave(message.from_user.id)
 
     if result.closed:
         if result.closed_by_creator:
             await message.answer(
-                f"Сессия <code>{esc(result.code)}</code> закрыта создателем."
+                f"Операция <code>{esc(result.code)}</code> закрыта создателем."
             )
         else:
             await message.answer(
-                f"Сессия <code>{esc(result.code)}</code> закрыта, потому что вышел последний игрок."
+                f"Операция <code>{esc(result.code)}</code> закрыта: вышел последний игрок."
             )
-    elif result.eliminated:
+        return
+
+    if result.vacated_roles:
         await message.answer(
-            "Вы покинули активную игру. Ваша партия продолжает ходить автоматически."
+            f"Вы покинули операцию. Роли вакантны: {esc(', '.join(result.vacated_roles))}."
         )
     else:
-        await message.answer("Вы покинули сессию.")
+        await message.answer("Вы покинули операцию.")
 
-    if (
-        result.session is not None
-        and result.session.status == SessionStatus.NEW
-        and not result.closed
-    ):
+    if result.report is not None and result.session is not None:
+        target = result.session.chat_id or message.chat.id
+        await send_lines(bot, target, format_report(result.report, result.session.pack))
+        if result.report.result:
+            await send_lines(bot, target, format_final(result.session, result.report))
+    elif result.session is not None and result.session.status == SessionStatus.NEW:
         await send_or_update_lobby(bot, session_manager, result.session)
 
-    if result.resolution is not None and result.session is not None:
-        await send_resolution(
-            bot,
-            message.chat.id,
-            result.session,
-            result.resolution,
-            pack_service,
-        )
 
-        if result.resolution.game_finished:
-            await send_lines(bot, message.chat.id, format_final(result.session))
-        else:
-            await send_turn(
-                bot, message.chat.id, result.session, pack_service, session_manager
-            )
+@router.message(Command("operation"))
+async def operation(
+    message: Message,
+    command: CommandObject,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if message.chat.type not in GROUP_TYPES:
+        await message.answer("Название задаётся в групповом чате.")
+        return
+    if message.from_user is None:
+        return
+    if not command.args or not command.args.strip():
+        await message.answer("Использование: /operation <название>")
+        return
+
+    session = await session_manager.set_operation_name(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        name=command.args.strip(),
+    )
+    await message.answer(f"Операция: <b>{esc(session.operation_name)}</b>")
+    await send_or_update_lobby(bot, session_manager, session)
+
+
+@router.message(Command("startgame"))
+async def startgame(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    bot: Bot,
+) -> None:
+    if message.chat.type not in GROUP_TYPES:
+        await message.answer("Игра запускается в групповом чате.")
+        return
+    if message.from_user is None:
+        return
+
+    session = await session_manager.start_game(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+    )
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text=(
+            "<b>Операция началась!</b>\n"
+            "Обсуждайте ситуацию в чате, а решения принимайте "
+            "в личных сообщениях бота: /menu"
+        ),
+    )
+    await _send_briefing(bot, session, pack_service)
 
 
 @router.message(Command("closegame"))
 async def closegame(
     message: Message,
     command: CommandObject,
-    session_manager: SessionManager,
+    session_manager: TarbinSessionManager,
 ) -> None:
     if message.from_user is None:
         return
 
     code = command.args.strip().upper() if command.args else None
-
     if not code:
         session = session_manager.get_by_chat(message.chat.id)
-        if session:
+        if session is not None:
             code = session.code
-
     if not code:
-        await message.answer("Использование: /closegame код")
+        await message.answer("Использование: /closegame [код]")
         return
 
-    try:
-        session = await session_manager.close(code=code, requester_id=message.from_user.id)
-    except PolIncError as exc:
-        await message.answer(f"Не удалось закрыть сессию: {esc(exc)}")
+    session = await session_manager.close(code=code, requester_id=message.from_user.id)
+    await message.answer(f"Операция <code>{esc(session.code)}</code> закрыта.")
+
+
+@router.message(Command("game"))
+async def game(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    session = None
+    if message.chat.type in GROUP_TYPES:
+        session = session_manager.get_by_chat(message.chat.id)
+    elif message.from_user is not None:
+        session = session_manager.get_by_user(message.from_user.id)
+
+    if session is None:
+        if message.chat.type in GROUP_TYPES:
+            await message.answer("В этом чате нет операции. Создать: /newgame")
+        else:
+            await message.answer("Вы не участвуете в операции.")
         return
 
-    await message.answer(f"Сессия <code>{esc(session.code)}</code> закрыта.")
+    if session.status == SessionStatus.NEW:
+        if message.chat.type in GROUP_TYPES:
+            await send_or_update_lobby(bot, session_manager, session)
+        else:
+            await send_lines(bot, message.chat.id, format_lobby(session))
+    else:
+        await send_lines(bot, message.chat.id, format_status(session))
 
 
 @router.message(Command("ss"))
 async def ss(
     message: Message,
     command: CommandObject,
-    session_manager: SessionManager,
-    pack_service: PackService,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
     bot: Bot,
 ) -> None:
     if message.chat.type not in GROUP_TYPES:
         await message.answer("Настройки сессии доступны в групповом чате.")
         return
-
     if message.from_user is None:
         return
 
     session = session_manager.get_by_chat(message.chat.id)
-
     if session is None:
-        await message.answer("В этом чате нет игровой сессии.")
+        await message.answer("В этом чате нет операции.")
         return
 
     if not command.args:
         lines = [
             "<b>Параметры сессии:</b>",
             "/ss pack id — выбрать пак",
-            "/ss turns <число> — выбрать длительность",
+            "/ss turns &lt;число&gt; — длительность операции",
+            "",
         ]
-
         if session.pack is not None:
-            available = ", ".join(str(duration) for duration in session.pack.durations)
-            lines.append("")
+            available = ", ".join(str(d) for d in session.pack.durations)
             lines.append(f"Доступные длительности: {available}")
+            lines.append(f"Текущая: {session.duration} ходов")
         else:
-            lines.append("")
             lines.append("Пак пока не выбран. Сначала: /ss pack id")
-
         await send_lines(bot, message.chat.id, lines)
+        await send_pack_list(bot, message.chat.id, pack_service)
         return
 
     parts = command.args.strip().split()
-    subcommand = parts[0].lower()
+    sub = parts[0].lower()
 
-    try:
-        if subcommand == "pack":
-            if len(parts) < 2:
-                await message.answer("Использование: /ss pack id")
-                return
-
-            pack_id = parts[1].strip()
-            meta = await pack_service.get_meta(pack_id)
-            pack = await pack_service.load_pack(meta)
-
-            session = await session_manager.set_pack(
-                chat_id=message.chat.id,
-                user_id=message.from_user.id,
-                meta=meta,
-                pack=pack,
-            )
-
-            await message.answer(
-                f"Пак {esc(meta.name)} установлен. Ходов: {session.duration}."
-            )
-
-            await send_or_update_lobby(bot, session_manager, session)
+    if sub == "pack":
+        if len(parts) < 2:
+            await message.answer("Использование: /ss pack id")
             return
-
-        if subcommand == "turns":
-            if len(parts) < 2:
-                await message.answer("Использование: /ss turns число")
-                return
-
-            if not parts[1].strip().isdigit():
-                await message.answer("Длительность должна быть числом.")
-                return
-
-            turns = int(parts[1].strip())
-
-            session = await session_manager.set_duration(
-                chat_id=message.chat.id,
-                user_id=message.from_user.id,
-                turns=turns,
-            )
-
-            await message.answer(f"Длительность игры установлена: {session.duration} ходов.")
-            await send_or_update_lobby(bot, session_manager, session)
-            return
-
-        await message.answer("Пока поддерживается только: /ss pack id и /ss turns число")
-    except PolIncError as exc:
-        await message.answer(f"Не удалось применить настройку: {esc(exc)}")
-
-
-@router.message(Command("reg"))
-async def reg(
-    message: Message,
-    session_manager: SessionManager,
-    state: FSMContext,
-    pack_service: PackService,
-    bot: Bot,
-) -> None:
-    if message.chat.type in GROUP_TYPES:
-        await message.answer("Регистрация партии происходит в личных сообщениях бота.")
-        return
-
-    if message.from_user is None:
-        return
-
-    await send_reg_banner(bot, message.chat.id, pack_service)
-
-    session = session_manager.get_by_user(message.from_user.id)
-
-    existing_party = None
-    try:
-        existing_party = await session_manager.get_persisted_party(message.from_user.id)
-    except Exception:
-        pass
-
-    if session is not None and session.status != SessionStatus.NEW:
-        await message.answer("Регистрировать партию можно только до старта игры.")
-        return
-
-    has_existing = existing_party is not None or (session is not None and session.players.get(message.from_user.id) is not None and session.players[message.from_user.id].party is not None)
-
-    if has_existing:
-        party_name = ""
-        if existing_party is not None:
-            party_name = existing_party.name
-            await state.update_data(party_name=party_name)
-        await message.answer(
-            f"У вас уже есть партия «{esc(party_name)}». "
-            "Вы можете её перезаписать.\n\n"
-            "Шаг 1/5. Отправьте название партии (до 30 символов).\n"
-            "Отмена: /cancel"
-        )
-    else:
-        await message.answer(
-            "Шаг 1/5. Отправьте название партии (до 30 символов).\n"
-            "Отмена: /cancel"
-        )
-
-    await state.set_state(RegStates.name)
-
-
-@router.message(Command("cancel"), F.chat.type == "private")
-async def cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Регистрация партии отменена.")
-
-
-@router.message(RegStates.name, F.chat.type == "private")
-async def reg_name(
-    message: Message,
-    state: FSMContext,
-    session_manager: SessionManager,
-) -> None:
-    if message.from_user is None:
-        return
-
-    if not message.text:
-        await message.answer("Отправьте название партии текстом.")
-        return
-
-    name = message.text.strip()[:30]
-
-    if not name:
-        await message.answer("Название партии не может быть пустым. Попробуйте ещё раз.")
-        return
-
-    await state.update_data(name=name)
-    await state.set_state(RegStates.slogan)
-
-    await message.answer(
-        "Шаг 2/5. Отправьте слоган партии (до 50 символов).\n"
-        "Если слоган не нужен, отправьте: -"
-    )
-
-
-@router.message(RegStates.slogan, F.chat.type == "private")
-async def reg_slogan(
-    message: Message,
-    state: FSMContext,
-    session_manager: SessionManager,
-) -> None:
-    if message.from_user is None:
-        return
-
-    if not message.text:
-        await message.answer("Отправьте слоган текстом.")
-        return
-
-    slogan = message.text.strip()
-
-    if slogan in {"-", "нет", "пропустить", "-"}:
-        slogan = ""
-    else:
-        slogan = slogan[:50]
-
-    await state.update_data(slogan=slogan)
-    await state.set_state(RegStates.ideology)
-
-    await message.answer("Шаг 3/5. Отправьте идеологию партии (до 30 символов).")
-
-
-@router.message(RegStates.ideology, F.chat.type == "private")
-async def reg_ideology(
-    message: Message,
-    state: FSMContext,
-    session_manager: SessionManager,
-    bot: Bot,
-) -> None:
-    if message.from_user is None:
-        return
-
-    if not message.text:
-        await message.answer("Отправьте идеологию текстом.")
-        return
-
-    ideology = message.text.strip()[:30]
-
-    if not ideology:
-        await message.answer("Идеология не может быть пустой. Попробуйте ещё раз.")
-        return
-
-    await state.update_data(ideology=ideology)
-    await state.set_state(RegStates.line)
-
-    await message.answer(
-        "Шаг 4/5. Опишите линию партии (до 600 символов).\n"
-        "Если линия не нужна, отправьте: -"
-    )
-
-
-@router.message(RegStates.line, F.chat.type == "private")
-async def reg_line(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    if message.from_user is None:
-        return
-
-    if not message.text:
-        await message.answer("Отправьте линию партии текстом.")
-        return
-
-    line = message.text.strip()
-
-    if line in {"-", "нет", "пропустить", "-"}:
-        line = ""
-    else:
-        line = line[:600]
-
-    await state.update_data(line=line)
-    await state.set_state(RegStates.photo)
-
-    await message.answer(
-        "Шаг 5/5. Отправьте фотографию партии (только одна, необязательно).",
-        reply_markup=_skip_photo_keyboard(),
-    )
-
-
-async def _finish_party_registration(
-    state: FSMContext,
-    session_manager: SessionManager,
-    bot: Bot,
-    chat_id: int,
-    user_id: int,
-    photo_object: str | None,
-) -> None:
-    data = await state.get_data()
-    name = data.get("name", "")
-    slogan = data.get("slogan", "")
-    ideology = data.get("ideology", "")
-    line = data.get("line", "")
-
-    try:
-        party = Party.create(
-            name=name,
-            slogan=slogan,
-            ideology=ideology,
-            line=line,
-            photo_object=photo_object,
-        )
-        session = await session_manager.register_party(
-            user_id=user_id,
-            party=party,
-        )
-    except PolIncError as exc:
-        await bot.send_message(
-            chat_id=chat_id, text=f"Не удалось зарегистрировать партию: {esc(exc)}"
-        )
-        return
-
-    await state.clear()
-
-    if session is not None:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"Партия «{esc(party.name)}» зарегистрирована "
-            f"в сессии <code>{esc(session.code)}</code>.",
-        )
-        await send_or_update_lobby(bot, session_manager, session)
-    else:
-        await bot.send_message(
-            chat_id=chat_id, text=f"Партия «{esc(party.name)}» зарегистрирована 🫡"
-        )
-
-
-@router.message(RegStates.photo, F.chat.type == "private", F.photo)
-async def reg_photo(
-    message: Message,
-    state: FSMContext,
-    session_manager: SessionManager,
-    party_repo: PartyRepository,
-    bot: Bot,
-) -> None:
-    if message.from_user is None or not message.photo:
-        return
-
-    file_id = message.photo[-1].file_id
-
-    try:
-        tg_file = await bot.get_file(file_id)
-        if not tg_file.file_path:
-            raise PolIncError("Не удалось получить файл фотографии.")
-
-        downloaded = await bot.download_file(tg_file.file_path)
-        if downloaded is None:
-            raise PolIncError("Не удалось скачать фотографию.")
-
-        photo_bytes = downloaded.read()
-
-        if not photo_bytes.startswith(b"\xff\xd8"):
-            await message.answer(
-                "Пришлите фотографию в формате JPEG или нажмите «Пропустить»."
-            )
-            return
-
-        photo_object = await party_repo.save_photo(message.from_user.id, photo_bytes)
-    except PolIncError as exc:
-        await message.answer(f"{esc(exc)} Попробуйте ещё раз или нажмите «Пропустить».")
-        return
-    except Exception:
-        logger.exception("Ошибка при загрузке фото партии")
-        await message.answer(
-            "Не удалось загрузить фотографию. Попробуйте ещё раз или нажмите «Пропустить»."
-        )
-        return
-
-    await _finish_party_registration(
-        state, session_manager, bot, message.chat.id, message.from_user.id, photo_object
-    )
-
-
-@router.callback_query(RegStates.photo, F.data == SKIP_PHOTO_CALLBACK)
-async def reg_skip_photo(
-    callback: CallbackQuery,
-    state: FSMContext,
-    session_manager: SessionManager,
-    bot: Bot,
-) -> None:
-    await callback.answer()
-
-    if callback.from_user is None or callback.message is None:
-        return
-
-    await _finish_party_registration(
-        state,
-        session_manager,
-        bot,
-        callback.message.chat.id,
-        callback.from_user.id,
-        None,
-    )
-
-
-@router.message(RegStates.photo, F.chat.type == "private")
-async def reg_photo_hint(message: Message) -> None:
-    await message.answer(
-        "Отправьте фотографию партии или нажмите «Пропустить».",
-        reply_markup=_skip_photo_keyboard(),
-    )
-
-
-@router.message(Command("startgame"))
-async def startgame(
-    message: Message,
-    session_manager: SessionManager,
-    pack_service: PackService,
-    bot: Bot,
-) -> None:
-    if message.chat.type not in GROUP_TYPES:
-        await message.answer("Игра запускается в групповом чате.")
-        return
-
-    if message.from_user is None:
-        return
-
-    logger.info(
-        "/startgame user_id=%s chat_id=%s username=%s",
-        message.from_user.id,
-        message.chat.id,
-        message.from_user.username,
-    )
-
-    try:
-        session = await session_manager.start_game(
+        meta = await pack_service.get_meta(parts[1].strip())
+        pack = await pack_service.load_pack(meta)
+        session = await session_manager.set_pack(
             chat_id=message.chat.id,
             user_id=message.from_user.id,
+            meta=meta,
+            pack=pack,
         )
-    except PolIncError as exc:
-        await message.answer(f"Не удалось запустить игру: {esc(exc)}")
-        return
-    except Exception:
-        logger.exception("Ошибка при запуске игры")
-        await message.answer("Внутренняя ошибка при запуске игры. Проверьте логи.")
+        await message.answer(
+            f"Пак {esc(meta.name)} установлен. Ходов: {session.duration}."
+        )
+        await send_or_update_lobby(bot, session_manager, session)
         return
 
-    await send_lines(bot, message.chat.id, format_welcome(session))
-    await send_turn(bot, message.chat.id, session, pack_service, session_manager)
+    if sub == "turns":
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await message.answer("Использование: /ss turns число")
+            return
+        session = await session_manager.set_duration(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            turns=int(parts[1].strip()),
+        )
+        await message.answer(f"Длительность установлена: {session.duration} ходов.")
+        await send_or_update_lobby(bot, session_manager, session)
+        return
+
+    await message.answer("Поддерживается: /ss pack id и /ss turns число")
 
 
-@router.message(Command("vote"))
-async def vote(
+@router.message(Command("status"))
+async def status(
     message: Message,
-    command: CommandObject,
-    session_manager: SessionManager,
-    pack_service: PackService,
+    session_manager: TarbinSessionManager,
     bot: Bot,
 ) -> None:
+    session = None
     if message.chat.type in GROUP_TYPES:
-        await message.answer("Голосование проходит только в личных сообщениях бота.")
-        return
+        session = session_manager.get_by_chat(message.chat.id)
+    elif message.from_user is not None:
+        session = session_manager.get_by_user(message.from_user.id)
 
+    if session is None:
+        await message.answer("Нет активной операции.")
+        return
+    await send_lines(bot, message.chat.id, format_status(session))
+
+
+@router.message(Command("help"))
+async def help_cmd(message: Message, bot: Bot) -> None:
+    await send_lines(bot, message.chat.id, format_help())
+
+
+# ---------- Личные команды ----------
+
+
+def _user_session(session_manager: TarbinSessionManager, user_id: int):
+    return session_manager.get_by_user(user_id)
+
+
+@router.message(Command("menu"))
+async def menu(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if not _require_private(message):
+        await message.answer("Меню штаба доступно в личных сообщениях бота.")
+        return
     if message.from_user is None:
         return
 
-    if not command.args:
-        await send_vote_keyboard(
-            bot, message.chat.id, session_manager, message.from_user.id
-        )
-        return
-
-    await process_vote(
-        bot,
-        session_manager,
-        pack_service,
-        message.chat.id,
-        message.from_user.id,
-        command.args,
-    )
-
-
-def vote_keyboard(session, user_id: int) -> InlineKeyboardMarkup:
-    player = session.players.get(user_id)
-    current = player.vote if player is not None else None
-
-    rows = []
-    for index, faction in enumerate(session.pack.factions, start=1):
-        mark = " ✅" if current is not None and faction.id == current else ""
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{index}. {faction.name}{mark}",
-                    callback_data=f"{VOTE_CALLBACK_PREFIX}{index}",
-                )
-            ]
-        )
-
-    rows.append(
-        [InlineKeyboardButton(text="✨ Способности", callback_data=ABILITIES_CALLBACK)]
-    )
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def send_vote_keyboard(
-    bot: Bot,
-    chat_id: int,
-    session_manager: SessionManager,
-    user_id: int,
-) -> None:
-    session = session_manager.get_by_user(user_id)
-
+    session = _user_session(session_manager, message.from_user.id)
     if session is None:
-        await bot.send_message(chat_id=chat_id, text="Вы не участвуете в сессии.")
+        await message.answer("Вы не участвуете в операции.")
         return
-
-    if session.status != SessionStatus.IN_GAME or session.pack is None:
-        await bot.send_message(
-            chat_id=chat_id, text="Голосование доступно только в запущенной игре."
-        )
+    if session.status != SessionStatus.IN_GAME or session.state is None:
+        await message.answer("Игра ещё не запущена. Дождитесь /startgame в группе.")
         return
 
     await bot.send_message(
-        chat_id=chat_id,
-        text="Выберите фракцию:",
-        reply_markup=vote_keyboard(session, user_id),
+        chat_id=message.chat.id,
+        text="\n".join(format_roles_menu(session, message.from_user.id)),
+        reply_markup=_main_menu_kb(session, message.from_user.id),
     )
 
 
-def faction_display_name(session, choice: str) -> str:
-    pack = session.pack
-    raw = choice.strip().lower()
-
-    if pack is not None:
-        if raw.isdigit():
-            index = int(raw) - 1
-            if 0 <= index < len(pack.factions):
-                return pack.factions[index].name
-
-        for faction in pack.factions:
-            if faction.id.lower() == raw or faction.name.lower() == raw:
-                return faction.name
-
-    return choice.strip()
-
-
-async def process_vote(
-    bot: Bot,
-    session_manager: SessionManager,
-    pack_service: PackService,
-    chat_id: int,
-    user_id: int,
-    choice: str,
-):
-    try:
-        session, changed, resolution = await session_manager.register_vote(
-            user_id=user_id,
-            choice=choice,
-        )
-    except PolIncError as exc:
-        await bot.send_message(
-            chat_id=chat_id, text=f"Не удалось проголосовать: {esc(exc)}"
-        )
-        return None
-
-    if changed:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"Голос принят. Вы проголосовали за: {esc(faction_display_name(session, choice))}.",
-        )
-    else:
-        await bot.send_message(
-            chat_id=chat_id, text="Ваш голос за эту фракцию уже был учтен."
-        )
-
-    if resolution is None:
-        await update_turn_message(bot, session)
-        return session
-
-    await send_resolution(
-        bot,
-        session.chat_id,
-        session,
-        resolution,
-        pack_service,
-    )
-
-    if resolution.game_finished:
-        await send_lines(bot, session.chat_id, format_final(session))
-    else:
-        await send_turn(bot, session.chat_id, session, pack_service, session_manager)
-
-    return session
-
-
-@router.callback_query(F.data.startswith(VOTE_CALLBACK_PREFIX))
-async def vote_button(
-    callback: CallbackQuery,
-    session_manager: SessionManager,
-    pack_service: PackService,
+@router.message(Command("actions"))
+async def actions(
+    message: Message,
+    command: CommandObject,
+    session_manager: TarbinSessionManager,
     bot: Bot,
 ) -> None:
-    await callback.answer()
-
-    if callback.from_user is None or callback.message is None:
+    if not _require_private(message):
+        await message.answer("Действия выбираются в личных сообщениях бота.")
+        return
+    if message.from_user is None:
         return
 
-    if callback.message.chat.type in GROUP_TYPES:
-        await callback.answer(
-            "Голосование проходит только в личных сообщениях бота.", show_alert=True
-        )
+    session = _user_session(session_manager, message.from_user.id)
+    if session is None:
+        await message.answer("Вы не участвуете в операции.")
+        return
+    if session.status != SessionStatus.IN_GAME or session.state is None:
+        await message.answer("Игра ещё не запущена.")
         return
 
-    try:
-        index = int(callback.data.split(":", 1)[1])
-    except (ValueError, IndexError, AttributeError):
+    roles = session.roles_of(message.from_user.id)
+    if not roles:
+        await message.answer("У вас нет ролей в этой операции.")
         return
 
-    session = await process_vote(
-        bot,
-        session_manager,
-        pack_service,
-        callback.message.chat.id,
-        callback.from_user.id,
-        str(index),
+    if command.args and command.args.strip().isdigit():
+        index = int(command.args.strip()) - 1
+        if 0 <= index < len(roles):
+            roles = [roles[index]]
+        else:
+            await message.answer(
+                f"Ролей у вас: {len(roles)}. Укажите номер от 1 до {len(roles)}."
+            )
+            return
+
+    lines = ["<b>Ваши действия на этом ходу:</b>", ""]
+    for role_id in roles:
+        lines.append(f"<b>{esc(_role_short(session, role_id))}:</b>")
+        options = session_manager.action_options(session, role_id)
+        if not options:
+            lines.append("- нет доступных действий")
+        for opt in options:
+            if opt.locked_reason:
+                lines.append(
+                    f"🔒 {esc(opt.name)} — {opt.cost} млн ({esc(opt.locked_reason)})"
+                )
+            else:
+                lines.append(
+                    f"- {esc(opt.name)} (<code>{esc(opt.action_id)}</code>) — {opt.cost} млн"
+                )
+        lines.append("")
+    lines.append("Выберите действие через /menu.")
+    await send_lines(bot, message.chat.id, lines)
+
+
+@router.message(Command("research"))
+async def research(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if not _require_private(message):
+        await message.answer("Исследования выбираются в личных сообщениях бота.")
+        return
+    if message.from_user is None:
+        return
+
+    session = _user_session(session_manager, message.from_user.id)
+    if session is None:
+        await message.answer("Вы не участвуете в операции.")
+        return
+    if session.status != SessionStatus.IN_GAME or session.state is None:
+        await message.answer("Игра ещё не запущена.")
+        return
+
+    await send_lines(bot, message.chat.id, format_research_menu(session))
+
+
+@router.message(Command("regions"))
+async def regions(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if not _require_private(message):
+        await message.answer("Сводка по регионам — в личных сообщениях бота.")
+        return
+    if message.from_user is None:
+        return
+
+    session = _user_session(session_manager, message.from_user.id)
+    if session is None:
+        await message.answer("Вы не участвуете в операции.")
+        return
+    if session.status != SessionStatus.IN_GAME or session.state is None:
+        await message.answer("Игра ещё не запущена.")
+        return
+
+    show_hideouts = _can_intel(session, message.from_user.id)
+    await send_lines(bot, message.chat.id, format_regions(session, show_hideouts))
+
+
+@router.message(Command("event"))
+async def event(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if not _require_private(message):
+        await message.answer("Голосование проходит в личных сообщениях бота.")
+        return
+    if message.from_user is None:
+        return
+
+    session = _user_session(session_manager, message.from_user.id)
+    if session is None:
+        await message.answer("Вы не участвуете в операции.")
+        return
+    if session.status != SessionStatus.IN_GAME or session.state is None:
+        await message.answer("Игра ещё не запущена.")
+        return
+    if not session.state.event_id:
+        await message.answer("Сейчас нет активного события.")
+        return
+
+    kb_rows: list[list[InlineKeyboardButton]] = []
+    if session.pack is not None:
+        for ev in session.pack.events:
+            if ev.id == session.state.event_id:
+                for option in ev.options:
+                    kb_rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"{option.id} — {option.title} ({option.cost} млн)",
+                                callback_data=f"menu:vote:{option.id}",
+                            )
+                        ]
+                    )
+                break
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text="\n".join(format_event_menu(session)),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None,
     )
 
-    if session is None:
+
+@router.message(Command("confirm"))
+async def confirm(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    bot: Bot,
+) -> None:
+    if not _require_private(message):
+        await message.answer("Подтверждение — в личных сообщениях бота.")
+        return
+    if message.from_user is None:
         return
 
+    session = _user_session(session_manager, message.from_user.id)
+    if session is None:
+        await message.answer("Вы не участвуете в операции.")
+        return
+
+    should_resolve = await session_manager.confirm(message.from_user.id)
+    await message.answer("Готов! ✅ Ждём остальных членов штаба.")
+    if should_resolve:
+        await _maybe_resolve_and_announce(bot, session_manager, pack_service, session)
+
+
+@router.message(Command("cancel"))
+async def cancel(
+    message: Message,
+    session_manager: TarbinSessionManager,
+) -> None:
+    if not _require_private(message):
+        await message.answer("Сброс заявок — в личных сообщениях бота.")
+        return
+    if message.from_user is None:
+        return
+
+    await session_manager.reset_turn(message.from_user.id)
+    await message.answer("Заявки этого хода сброшены.")
+
+
+@router.message(Command("loy"))
+async def loy(
+    message: Message,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    if not _require_private(message):
+        await message.answer("Личная карточка — в личных сообщениях бота.")
+        return
+    if message.from_user is None:
+        return
+
+    session = _user_session(session_manager, message.from_user.id)
+    if session is None:
+        await message.answer("Вы не участвуете в операции.")
+        return
+
+    await send_lines(bot, message.chat.id, format_loy(session, message.from_user.id))
+
+
+# ---------- Callback'и ----------
+
+
+@router.callback_query(F.data == "noop")
+async def noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:back")
+async def cb_back(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
     try:
-        fresh = session_manager.get_by_user(callback.from_user.id)
+        if callback.from_user is None:
+            return
+        await callback.answer()
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None or session.state is None:
+            return
+        await _refresh_main_menu(callback, session, callback.from_user.id)
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
 
-        if (
-            fresh is not None
-            and fresh.status == SessionStatus.IN_GAME
-            and fresh.pack is not None
-        ):
-            await callback.message.edit_reply_markup(
-                reply_markup=vote_keyboard(fresh, callback.from_user.id)
+
+@router.callback_query(F.data.startswith("menu:role:"))
+async def cb_role(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        await callback.answer()
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None or session.state is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3:
+            return
+        role_id = parts[2]
+        options = session_manager.action_options(session, role_id)
+        lines = [f"<b>{esc(_role_short(session, role_id))}. Выберите действие:</b>", ""]
+        rows: list[list[InlineKeyboardButton]] = []
+        for opt in options:
+            if opt.locked_reason:
+                lines.append(
+                    f"🔒 {esc(opt.name)} — {opt.cost} млн ({esc(opt.locked_reason)})"
+                )
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"🔒 {opt.name}",
+                            callback_data="noop",
+                        )
+                    ]
+                )
+            else:
+                lines.append(f"- {esc(opt.name)} — {opt.cost} млн")
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"{opt.name} ({opt.cost} млн)",
+                            callback_data=f"menu:act:{role_id}:{opt.action_id}",
+                        )
+                    ]
+                )
+        rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
+        await message.edit_text(
+            "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("menu:act:"))
+async def cb_act(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    bot: Bot,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 4:
+            return
+        _, _, role_id, action_id = parts
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None or session.state is None or session.pack is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        action = session.pack.action_by_id(action_id)
+        if action is None:
+            await callback.answer("Действие не найдено.", show_alert=True)
+            return
+        if action.target == "region":
+            rows: list[list[InlineKeyboardButton]] = []
+            for region in session.state.regions.values():
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=region.name,
+                            callback_data=f"menu:reg:{role_id}:{action_id}:{region.region_id}",
+                        )
+                    ]
+                )
+            rows.append(
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")]
             )
-    except Exception:
-        logger.debug("Не удалось обновить клавиатуру голосования.")
+            await callback.answer()
+            await message.edit_text(
+                f"<b>{esc(action.name)}</b>. Выберите регион:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
+            return
+        should_resolve = await session_manager.submit_action(
+            callback.from_user.id, role_id, action_id, ""
+        )
+        await callback.answer(f"Заявка принята: {action.name}")
+        await _refresh_main_menu(callback, session, callback.from_user.id)
+        if should_resolve:
+            await _maybe_resolve_and_announce(
+                bot, session_manager, pack_service, session
+            )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
 
 
-@router.callback_query(F.data == ABILITIES_CALLBACK)
-async def abilities_button(callback: CallbackQuery) -> None:
-    await callback.answer("Способности скоро появятся.")
+@router.callback_query(F.data.startswith("menu:reg:"))
+async def cb_reg(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    bot: Bot,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 5:
+            return
+        _, _, role_id, action_id, region_id = parts
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        should_resolve = await session_manager.submit_action(
+            callback.from_user.id, role_id, action_id, region_id
+        )
+        await callback.answer("Заявка принята.")
+        await _refresh_main_menu(callback, session, callback.from_user.id)
+        if should_resolve:
+            await _maybe_resolve_and_announce(
+                bot, session_manager, pack_service, session
+            )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("menu:res:"))
+async def cb_res(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        await callback.answer()
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3:
+            return
+        role_id = parts[2]
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None or session.state is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        options = session_manager.research_options(session, role_id)
+        lines = [f"<b>Исследования ({esc(_role_short(session, role_id))}):</b>", ""]
+        rows: list[list[InlineKeyboardButton]] = []
+        for opt in options:
+            if opt.locked_reason:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"🔒 {opt.name}",
+                            callback_data="noop",
+                        )
+                    ]
+                )
+            else:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"{opt.name} ({opt.cost} млн)",
+                            callback_data=f"menu:tech:{role_id}:{opt.tech_id}",
+                        )
+                    ]
+                )
+        rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
+        await message.edit_text(
+            "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("menu:tech:"))
+async def cb_tech(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    bot: Bot,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 4:
+            return
+        _, _, role_id, tech_id = parts
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        should_resolve = await session_manager.submit_research(
+            callback.from_user.id, role_id, tech_id
+        )
+        await callback.answer("Исследование заявлено.")
+        await _refresh_main_menu(callback, session, callback.from_user.id)
+        if should_resolve:
+            await _maybe_resolve_and_announce(
+                bot, session_manager, pack_service, session
+            )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data == "menu:event")
+async def cb_event(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        await callback.answer()
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None or session.state is None or session.pack is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        if not session.state.event_id:
+            await callback.answer("Сейчас нет активного события.", show_alert=True)
+            return
+        rows: list[list[InlineKeyboardButton]] = []
+        for event in session.pack.events:
+            if event.id == session.state.event_id:
+                for option in event.options:
+                    rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"{option.id} — {option.title}",
+                                callback_data=f"menu:vote:{option.id}",
+                            )
+                        ]
+                    )
+                break
+        rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
+        await message.edit_text(
+            "\n".join(format_event_menu(session)),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("menu:vote:"))
+async def cb_vote(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+    bot: Bot,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3:
+            return
+        option_id = parts[2]
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        await session_manager.vote_event(callback.from_user.id, option_id)
+        await callback.answer(f"Голос принят: {option_id}")
+        await _refresh_main_menu(callback, session, callback.from_user.id)
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data == "menu:ready")
+async def cb_ready(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    bot: Bot,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        should_resolve = await session_manager.confirm(callback.from_user.id)
+        await callback.answer("Готов! ✅")
+        if should_resolve:
+            await _maybe_resolve_and_announce(
+                bot, session_manager, pack_service, session
+            )
+        else:
+            await _refresh_main_menu(callback, session, callback.from_user.id)
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data == "menu:intel")
+async def cb_intel(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        await callback.answer()
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        intentions, regions, hideouts = session_manager.intel_brief(session)
+        lines = ["<b>🛰 Сводка разведки:</b>", ""]
+        if intentions:
+            lines.append("<b>Намерения Al Nazra:</b>")
+            for item in intentions:
+                lines.append(f"- {esc(item)}")
+        else:
+            lines.append("Намерения Al Nazra пока не раскрыты.")
+        lines.append("")
+        if regions:
+            lines.append(f"Разведанные регионы: {esc(', '.join(regions))}")
+        else:
+            lines.append("Разведанных регионов пока нет.")
+        lines.append(f"Подтверждено логовов: {hideouts}")
+        await message.edit_text("\n".join(lines), reply_markup=_back_kb())
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data == "menu:prio")
+async def cb_prio(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        await callback.answer()
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        rows: list[list[InlineKeyboardButton]] = []
+        for direction in PRIORITY_DIRECTIONS:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=PRIORITY_RU.get(direction, direction),
+                        callback_data=f"menu:prio:{direction}",
+                    )
+                ]
+            )
+        rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
+        await message.edit_text(
+            "<b>🧭 Приоритет операции:</b>\nСоответствующие действия получат бонус.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("menu:prio:"))
+async def cb_prio_set(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+) -> None:
+    try:
+        message = _cb_message(callback)
+        if callback.from_user is None or message is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3:
+            return
+        direction = parts[2]
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        await session_manager.set_priority(callback.from_user.id, direction)
+        await callback.answer(f"Приоритет: {PRIORITY_RU.get(direction, direction)}")
+        await _refresh_main_menu(callback, session, callback.from_user.id)
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)

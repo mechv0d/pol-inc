@@ -14,7 +14,9 @@ from .handlers import router as commands_router
 logger = logging.getLogger(__name__)
 
 
-def create_dispatcher(storage: BaseStorage | None = None, **workflow_data) -> Dispatcher:
+def create_dispatcher(
+    storage: BaseStorage | None = None, **workflow_data
+) -> Dispatcher:
     dp = Dispatcher(storage=storage, **workflow_data)
     dp.include_router(commands_router)
 
