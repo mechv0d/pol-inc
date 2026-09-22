@@ -255,6 +255,23 @@ async def _send_map(bot: Bot, chat_id: int, caption: str = "🗺 Карта Та
     await bot.send_message(chat_id=chat_id, text=caption)
 
 
+async def _announce_actions(bot: Bot, session, report) -> None:
+    if not report.action_cards:
+        return
+
+    lines = ["<b>🧑‍✈️ Действия штаба:</b>", ""]
+    for card in report.action_cards:
+        target = f" → {esc(card['region'])}" if card.get("region") else ""
+        lines.append(
+            f"- {esc(card.get('player') or '?')} ({esc(card.get('role', ''))}): "
+            f"{esc(card.get('action', ''))}{target} — {card.get('cost', 0)} млн"
+        )
+        if card.get("desc"):
+            lines.append(f"  <i>{esc(card['desc'])}</i>")
+
+    await send_lines(bot, session.chat_id, lines)
+
+
 async def _announce_report(
     bot: Bot,
     pack_service: TarbinPackService,
@@ -265,6 +282,7 @@ async def _announce_report(
     if banner:
         await send_pack_photo(bot, session.chat_id, pack_service, banner)
     await send_lines(bot, session.chat_id, format_report(report, session.pack))
+    await _announce_actions(bot, session, report)
     if report.result:
         await send_lines(bot, session.chat_id, format_final(session, report))
     else:
@@ -1226,7 +1244,7 @@ async def cb_role(
             summary_text = f" ({summary})" if summary else ""
             if opt.locked_reason:
                 lines.append(
-                    f"🔒 {esc(opt.name)} — {opt.cost} млн{esc(summary_text)} "
+                    f"🔒 {esc(opt.name)} — {opt.cost} млн{esc(summary_text)} \n"
                     f"({esc(opt.locked_reason)})"
                 )
                 rows.append(
@@ -1238,7 +1256,7 @@ async def cb_role(
                     ]
                 )
             else:
-                lines.append(f"- {esc(opt.name)} — {opt.cost} млн{esc(summary_text)}")
+                lines.append(f"- {esc(opt.name)} — {opt.cost} млн{esc(summary_text)}\n")
                 rows.append(
                     [
                         InlineKeyboardButton(

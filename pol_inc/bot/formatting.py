@@ -202,6 +202,13 @@ def format_briefing(
     lines.append("<b>📊 Состояние:</b>")
     lines.extend(_state_lines(session))
     lines.append("")
+    if state is not None and state.upkeep:
+        upkeep = ", ".join(
+            f"{esc(item.name)} −{item.cost} млн" for item in state.upkeep
+        )
+        total = sum(item.cost for item in state.upkeep)
+        lines.append(f"🧾 Содержание в конце хода: {upkeep} (итого −{total} млн).")
+        lines.append("")
     lines.append("<b>🧑‍✈️ Штаб:</b>")
     for player in session.players.values():
         pack_roles = session.pack
@@ -249,6 +256,11 @@ def format_report(report: TurnReport, pack: TarbinGamePack | None = None) -> lis
     if report.invalid:
         lines.append("<b>Отклонено:</b>")
         for item in report.invalid:
+            lines.append(f"- {esc(item)}")
+        lines.append("")
+    if report.spending:
+        lines.append("<b>💸 Траты:</b>")
+        for item in report.spending:
             lines.append(f"- {esc(item)}")
         lines.append("")
     if report.global_deltas:
