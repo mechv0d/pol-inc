@@ -234,7 +234,9 @@ async def _send_briefing(
     if event is not None and event.banner:
         await send_pack_photo(bot, session.chat_id, pack_service, event.banner)
     await send_lines(
-        bot, session.chat_id, format_briefing(session, session.pack, event, region_name)
+        bot,
+        session.chat_id,
+        format_briefing(session, session.pack, event, region_name, session.last_report),
     )
 
 
@@ -268,6 +270,7 @@ async def _announce_actions(bot: Bot, session, report) -> None:
         )
         if card.get("desc"):
             lines.append(f"  <i>{esc(card['desc'])}</i>")
+        lines.append("")
 
     await send_lines(bot, session.chat_id, lines)
 
@@ -308,6 +311,7 @@ async def _maybe_resolve_and_announce(
     except ActionError:
         return False
 
+    fresh.last_report = report
     await _announce_report(bot, pack_service, fresh, report)
     return True
 
@@ -1265,10 +1269,47 @@ async def cb_role(
                         )
                     ]
                 )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⏭ Пропустить заявку",
+                    callback_data=f"menu:pass:{role_id}",
+                )
+            ]
+        )
         rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
         await message.edit_text(
             "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
         )
+    except PolIncError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("menu:pass:"))
+async def cb_pass(
+    callback: CallbackQuery,
+    session_manager: TarbinSessionManager,
+    pack_service: TarbinPackService,
+    bot: Bot,
+) -> None:
+    try:
+        if callback.from_user is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 3:
+            return
+        role_id = parts[2]
+        session = _user_session(session_manager, callback.from_user.id)
+        if session is None:
+            await callback.answer("Нет активной игры.", show_alert=True)
+            return
+        should_resolve = await session_manager.pass_role(callback.from_user.id, role_id)
+        await callback.answer("Заявка пропущена.")
+        await _refresh_main_menu(callback, session, callback.from_user.id)
+        if should_resolve:
+            await _maybe_resolve_and_announce(
+                bot, session_manager, pack_service, session
+            )
     except PolIncError as exc:
         await callback.answer(str(exc), show_alert=True)
 

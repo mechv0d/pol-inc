@@ -6,6 +6,7 @@ from pol_inc.application.tarbin_packs import TarbinPackMeta
 from pol_inc.domain.enums import SessionStatus
 from pol_inc.domain.tarbin_game import (
     BRANCH_CATEGORY,
+    STAT_LABELS,
     TurnReport,
     role_category,
     slots_for_role,
@@ -176,7 +177,11 @@ def _state_lines(session) -> list[str]:
 
 
 def format_briefing(
-    session, pack: TarbinGamePack | None, event=None, region_name: str = ""
+    session,
+    pack: TarbinGamePack | None,
+    event=None,
+    region_name: str = "",
+    prev_report: TurnReport | None = None,
 ) -> list[str]:
     state = session.state
     turn = state.turn if state is not None else 1
@@ -223,8 +228,24 @@ def format_briefing(
     if state is not None and state.event_id:
         lines.append("- голосование по событию")
     lines.append("")
+    if prev_report is not None and prev_report.region_deltas:
+        lines.append("<b>📊 Изменения в регионах за прошлый ход:</b>")
+        regions = state.regions if state is not None else {}
+        for region_id, changes in prev_report.region_deltas.items():
+            region = regions.get(region_id)
+            name = region.name if region is not None else region_id
+            parts = ", ".join(
+                f"{_region_stat_label(stat)} {format_delta(delta)}"
+                for stat, delta in changes.items()
+            )
+            lines.append(f"- {esc(name)}: {parts}")
+        lines.append("")
     lines.append("Все решения принимаются в личных сообщениях бота: /menu")
     return lines
+
+
+def _region_stat_label(stat: str) -> str:
+    return STAT_LABELS.get(stat, stat)
 
 
 def _delta_label(stat: str) -> str:
