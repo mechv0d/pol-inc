@@ -153,6 +153,8 @@ class TurnReport:
     chosen_option: str = ""
     outcome_id: str = ""
     actions: list[str] = field(default_factory=list)
+    action_cards: list[dict] = field(default_factory=list)
+    spending: list[str] = field(default_factory=list)
     research_done: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)
     global_deltas: dict[str, int] = field(default_factory=dict)
@@ -174,9 +176,7 @@ class GameState:
     event_index: int = 0
     budget: int = 120
     initiative: int = 50
-    trust: int = 0
     corruption: int = 0
-    al_support: int = 10
     regions: dict[str, RegionState] = field(default_factory=dict)
     researched: list[str] = field(default_factory=list)
     cooldowns: dict[str, int] = field(default_factory=dict)
@@ -202,6 +202,88 @@ class GameState:
     event_region_id: str = ""
     vacant_roles: list[str] = field(default_factory=list)
 
+    @property
+    def trust(self) -> int:
+        return round_half_up(mean_stat(self, "trust"))
+
+    @property
+    def al_support(self) -> int:
+        return round_half_up(mean_stat(self, "al_nazra"))
+
+
+def round_half_up(value: float) -> int:
+    return math.floor(value + 0.5)
+
+
+def mean_stat(state: GameState, stat: str) -> float:
+    regions = list(state.regions.values())
+    if not regions:
+        return 0.0
+    return sum(getattr(region, stat) for region in regions) / len(regions)
+
+
+def spread_stat(state: GameState, stat: str, delta: int) -> int:
+    """Распределяет delta по регионам (крупный остаток первым).
+
+    Рост идёт сначала в самые низкие, падение — из самых высоких.
+    Возвращает реально применённый итог.
+    """
+    regions = list(state.regions.values())
+    if not regions or delta == 0:
+        return 0
+
+    sign = 1 if delta > 0 else -1
+    ordered = sorted(
+        regions, key=lambda region: getattr(region, stat), reverse=(delta < 0)
+    )
+    base, remainder = divmod(abs(delta), len(ordered))
+    applied = 0
+
+    for index, region in enumerate(ordered):
+        share = sign * (base + (1 if index < remainder else 0))
+        if share == 0:
+            continue
+        before = getattr(region, stat)
+        setattr(region, stat, _clamp(before + share))
+        applied += getattr(region, stat) - before
+
+    return applied
+
+
+def nudge_mean(state: GameState, stat: str, target: float) -> int:
+    """Подтягивает среднее значение стата к цели. Возвращает применённый итог."""
+    applied = 0
+
+    for _ in range(10000):
+        mean = mean_stat(state, stat)
+        if abs(mean - target) < 1e-9:
+            break
+
+        if mean < target:
+            candidates = [
+                region
+                for region in state.regions.values()
+                if getattr(region, stat) < 100
+            ]
+            if not candidates:
+                break
+            region = min(candidates, key=lambda item: getattr(item, stat))
+            step = 1
+        else:
+            candidates = [
+                region for region in state.regions.values() if getattr(region, stat) > 0
+            ]
+            if not candidates:
+                break
+            region = max(candidates, key=lambda item: getattr(item, stat))
+            step = -1
+
+        before = getattr(region, stat)
+        setattr(region, stat, _clamp(before + step))
+        applied += getattr(region, stat) - before
+
+    return applied
+
 
 def new_game_state(
     pack: TarbinGamePack, duration: int, rng: random.Random
@@ -213,9 +295,7 @@ def new_game_state(
         event_turns=pack.event_turns_for_duration(duration),
         budget=settings.start_budget,
         initiative=settings.start_initiative,
-        trust=settings.start_trust,
         corruption=settings.start_corruption,
-        al_support=settings.start_al_nazra_support,
     )
 
     for region_def in pack.regions:
@@ -387,20 +467,20 @@ def apply_effect(
 
         before = getattr(region, effect.stat)
         setattr(region, effect.stat, _clamp(before + effect.delta))
-
-        if effect.stat == "trust" and effect.delta > 0:
-            state.trust = _clamp(state.trust + math.ceil(effect.delta / 2))
-            report.global_deltas["trust_global"] = report.global_deltas.get(
-                "trust_global", 0
-            ) + math.ceil(effect.delta / 2)
         return
 
     if effect.stat not in GLOBAL_STATS:
         return
 
-    if effect.stat == "trust_global":
-        state.trust = _clamp(state.trust + effect.delta)
-    elif effect.stat == "initiative":
+    if effect.stat in {"trust_global", "al_nazra_support"}:
+        region_stat = "trust" if effect.stat == "trust_global" else "al_nazra"
+        applied = spread_stat(state, region_stat, effect.delta)
+        report.global_deltas[effect.stat] = (
+            report.global_deltas.get(effect.stat, 0) + applied
+        )
+        return
+
+    if effect.stat == "initiative":
         state.initiative = _clamp(state.initiative + effect.delta)
     elif effect.stat == "budget":
         if effect.delta >= 0:
@@ -409,8 +489,6 @@ def apply_effect(
             state.budget += effect.delta
     elif effect.stat == "corruption":
         state.corruption = _clamp(state.corruption + effect.delta)
-    elif effect.stat == "al_nazra_support":
-        state.al_support = _clamp(state.al_support + effect.delta)
 
     report.global_deltas[effect.stat] = (
         report.global_deltas.get(effect.stat, 0) + effect.delta
@@ -544,9 +622,11 @@ def resolve_turn(
     state: GameState,
     role_owners: dict[str, int],
     rng: random.Random,
+    player_names: dict[int, str] | None = None,
 ) -> TurnReport:
     report = TurnReport(turn=state.turn)
-    support_start = state.al_support
+    support_start = mean_stat(state, "al_nazra")
+    names = player_names or {}
 
     commander_user_id = role_owners.get("commander")
 
@@ -561,6 +641,20 @@ def resolve_turn(
             tech = pack.tech_by_id(submitted.tech_id)
             name = tech.name if tech else submitted.tech_id
             report.research_done.append(f"{role_name(pack, role_id)}: {name}")
+            if submitted.cost_paid:
+                report.spending.append(
+                    f"Исследование {name} — {submitted.cost_paid} млн"
+                )
+            report.action_cards.append(
+                {
+                    "player": names.get(role_owners.get(role_id, -1), ""),
+                    "role": role_name(pack, role_id),
+                    "action": f"Исследование: {name}",
+                    "region": "",
+                    "cost": submitted.cost_paid,
+                    "desc": tech.description[:140] if tech and tech.description else "",
+                }
+            )
 
     # Фаза 5: действия игроков.
     info_used = False
@@ -614,6 +708,12 @@ def resolve_turn(
         if "emergency" in action.tags:
             emergency_used = True
 
+        if submitted.cost_paid:
+            report.spending.append(f"{action.name} — {submitted.cost_paid} млн")
+        report.action_cards.append(
+            _action_card(pack, role_owners, names, role_id, action, region, submitted)
+        )
+
     has_info_turn = info_used
 
     for role_id, submitted, action, region, effects in military_actions:
@@ -650,6 +750,12 @@ def resolve_turn(
             notes.append("низкое доверие: дополнительный штраф -1")
 
         apply_action_effects(pack, state, report, role_id, action, region, effects)
+
+        if submitted.cost_paid:
+            report.spending.append(f"{action.name} — {submitted.cost_paid} млн")
+        report.action_cards.append(
+            _action_card(pack, role_owners, names, role_id, action, region, submitted)
+        )
 
         region_name = region.name if region else "штаб"
         line = f"{role_name(pack, role_id)}: {action.name} → {region_name}"
@@ -689,6 +795,8 @@ def resolve_turn(
         )
         report.chosen_option = chosen.title
         state.budget -= chosen.cost
+        if chosen.cost:
+            report.spending.append(f"Событие: {chosen.title} — {chosen.cost} млн")
 
         for effect in chosen.effects:
             apply_effect(
@@ -710,9 +818,9 @@ def resolve_turn(
                 report.global_deltas.get("initiative", 0) - 2
             )
     else:
-        state.al_support = _clamp(state.al_support + 1)
+        applied = spread_stat(state, "al_nazra", 1)
         report.global_deltas["al_nazra_support"] = (
-            report.global_deltas.get("al_nazra_support", 0) + 1
+            report.global_deltas.get("al_nazra_support", 0) + applied
         )
 
     # Фаза 7: ход Al Nazra.
@@ -743,6 +851,30 @@ def resolve_turn(
 def role_name(pack: TarbinGamePack, role_id: str) -> str:
     role = pack.role_by_id(role_id)
     return role.short_name or role.name if role else role_id
+
+
+def _action_card(
+    pack: TarbinGamePack,
+    role_owners: dict[str, int],
+    player_names: dict[int, str],
+    role_id: str,
+    action,
+    region,
+    submitted: Submission,
+) -> dict:
+    desc = (action.description or "").strip()
+    if len(desc) > 140:
+        desc = desc[:137] + "..."
+    if not desc:
+        desc = action_summary(action)
+    return {
+        "player": player_names.get(role_owners.get(role_id, -1), ""),
+        "role": role_name(pack, role_id),
+        "action": action.name,
+        "region": region.name if region else "",
+        "cost": submitted.cost_paid,
+        "desc": desc,
+    }
 
 
 def pack_event_by_id(pack: TarbinGamePack, event_id: str) -> GameEventDef | None:
@@ -919,9 +1051,9 @@ def run_al_nazra(pack, state, report, rng) -> None:
     ]
 
     if not eligible:
-        state.al_support = _clamp(state.al_support + 1)
+        applied = spread_stat(state, "al_nazra", 1)
         report.global_deltas["al_nazra_support"] = (
-            report.global_deltas.get("al_nazra_support", 0) + 1
+            report.global_deltas.get("al_nazra_support", 0) + applied
         )
         report.al_nazra_operation = "Затишье"
         return
@@ -984,6 +1116,9 @@ def run_region_passives(pack, state, report) -> None:
         if region.al_nazra > region.security:
             region.al_nazra = _clamp(region.al_nazra + 1)
             region.government = _clamp(region.government - 1)
+            region.trust = _clamp(region.trust - 1)
+        elif region.al_nazra < region.security:
+            region.al_nazra = _clamp(region.al_nazra - 1)
 
         if region.trust > 60:
             region.security = _clamp(region.security + 1)
@@ -1007,13 +1142,14 @@ def run_region_passives(pack, state, report) -> None:
             region.modifiers.remove(modifier)
 
 
-def run_global_passives(pack, state, report, support_start: int) -> None:
+def run_global_passives(pack, state, report, support_start: float) -> None:
     settings = pack.settings
     flags = tech_flags(pack, state)
 
-    state.initiative = _clamp(state.initiative - settings.initiative_decay)
+    decay = settings.initiative_decay + math.floor(state.al_support / 15)
+    state.initiative = _clamp(state.initiative - decay)
     report.global_deltas["initiative"] = (
-        report.global_deltas.get("initiative", 0) - settings.initiative_decay
+        report.global_deltas.get("initiative", 0) - decay
     )
 
     growth = 1 + flags.get("corruption_growth_delta", 0)
@@ -1032,16 +1168,19 @@ def run_global_passives(pack, state, report, support_start: int) -> None:
         report.al_nazra_notes.append(f"Вакантные роли: -{penalty} инициативы.")
 
     avg_security = average(region.security for region in state.regions.values())
-    drift = (
-        1
-        + math.floor((100 - avg_security) / 25)
-        + math.floor((100 - state.trust) / 25)
+    raw_drift = (
+        math.floor((100 - avg_security) / 25)
+        + math.floor((100 - mean_stat(state, "trust")) / 25)
+        - 1
         - flags.get("intel_slow", 0)
     )
-    state.al_support = _clamp(state.al_support + drift)
-    total_change = max(-5, min(6, state.al_support - support_start))
-    state.al_support = _clamp(support_start + total_change)
-    report.global_deltas["al_nazra_support"] = state.al_support - support_start
+    drift = max(-2, min(5, raw_drift))
+    mean_now = mean_stat(state, "al_nazra")
+    target = max(support_start - 5, min(support_start + 6, mean_now + drift))
+    nudge_mean(state, "al_nazra", target)
+    report.global_deltas["al_nazra_support"] = round_half_up(
+        mean_stat(state, "al_nazra")
+    ) - round_half_up(support_start)
 
     avg_economy = average(region.economy for region in state.regions.values())
     income = (
@@ -1059,10 +1198,18 @@ def run_global_passives(pack, state, report, support_start: int) -> None:
     state.pending_income = 0
     state.pending_income_bonus = 0
 
-    if upkeep_total > 0 and state.budget < 0:
-        state.trust = _clamp(state.trust - 1)
+    civil_upkeep = sum(1 for item in state.upkeep if item.owner_role == "civil_admin")
+    if civil_upkeep:
+        applied = spread_stat(state, "trust", civil_upkeep)
         report.global_deltas["trust_global"] = (
-            report.global_deltas.get("trust_global", 0) - 1
+            report.global_deltas.get("trust_global", 0) + applied
+        )
+        report.region_notes.append(f"Гражданские объекты: +{applied} доверия.")
+
+    if upkeep_total > 0 and state.budget < 0:
+        applied = spread_stat(state, "trust", -1)
+        report.global_deltas["trust_global"] = (
+            report.global_deltas.get("trust_global", 0) + applied
         )
 
     if state.budget < 0:
@@ -1088,7 +1235,7 @@ def average(values) -> float:
 
 
 def check_endings(pack, state, report) -> None:
-    if state.trust >= 100 and state.al_support <= 20 and state.initiative > 0:
+    if state.trust >= 100 and state.al_support <= 20:
         report.result = "victory_full"
         report.result_reason = "Полная победа: доверие 100%, Аль Назра подавлена."
         return
@@ -1137,11 +1284,10 @@ def check_endings(pack, state, report) -> None:
                 STATUS_RANK[region.status] >= STATUS_RANK["unstable"]
                 for region in state.regions.values()
             )
-            and state.initiative >= 30
         ):
             report.result = "victory_campaign"
             report.result_reason = "Кампания завершена успешно."
-        elif state.trust >= 50 and state.al_support <= 25 and state.initiative >= 20:
+        elif state.trust >= 50 and state.al_support <= 25:
             report.result = "victory_partial"
             report.result_reason = "Частичный успех операции."
         else:

@@ -35,23 +35,8 @@ KNOWN_TECH_FLAGS = {
     "infra_econ",
 }
 
-# Роли штаба, активные при разном числе игроков (раздел 6.3 документа).
-ROLE_SETS: dict[int, list[str]] = {
-    2: [
-        "commander",
-        "military_coordinator",
-        "civil_admin",
-        "finance_director",
-    ],
-    3: [
-        "commander",
-        "military_coordinator",
-        "civil_admin",
-        "finance_director",
-        "liaison",
-    ],
-}
-
+# Все 6 ролей штаба активны всегда: при малом числе игроков один игрок
+# контролирует несколько ролей.
 FULL_STAFF = [
     "commander",
     "military_coordinator",
@@ -63,10 +48,6 @@ FULL_STAFF = [
 
 
 def active_roles_for_players(player_count: int) -> list[str]:
-    if player_count <= 2:
-        return list(ROLE_SETS[2])
-    if player_count == 3:
-        return list(ROLE_SETS[3])
     return list(FULL_STAFF)
 
 
@@ -209,7 +190,7 @@ class TarbinSettings(BaseModel):
     start_trust: int = 0
     start_corruption: int = 0
     start_al_nazra_support: int = 10
-    initiative_decay: int = 4
+    initiative_decay: int = 1
     base_income: int = 10
     timeout_hours: int = 4
 
