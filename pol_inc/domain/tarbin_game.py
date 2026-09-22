@@ -165,6 +165,7 @@ class TurnReport:
     income: int = 0
     upkeep_paid: int = 0
     income_parts: dict[str, int] = field(default_factory=dict)
+    region_deltas: dict[str, dict[str, int]] = field(default_factory=dict)
     result: str = ""
     result_reason: str = ""
 
@@ -189,7 +190,7 @@ class GameState:
     deficit_mult: float = 1.0
     info_streak: int = 0
     priority: str | None = None
-    mobilization_used: bool = False
+    mobilization_turns_left: int = 0
     mobilization_active: bool = False
     intentions: list[str] = field(default_factory=list)
     revealed_intentions: list[str] = field(default_factory=list)
@@ -400,8 +401,8 @@ def validate_action_submit(
     if action.target == "region" and region_id not in state.regions:
         return 0, "Укажите корректный регион."
 
-    if "mobilize" in action.tags and state.mobilization_used:
-        return 0, "Мобилизация уже использовалась."
+    if "mobilize" in action.tags and state.mobilization_turns_left > 0:
+        return 0, "Мобилизация уже действует."
 
     cost = effective_cost(pack, state, role_id, action.cost)
     if state.budget < cost:
@@ -628,6 +629,20 @@ def resolve_turn(
     report = TurnReport(turn=state.turn)
     support_start = mean_stat(state, "al_nazra")
     names = player_names or {}
+    snapshot = {
+        region_id: {
+            stat: getattr(region, stat)
+            for stat in (
+                "economy",
+                "trust",
+                "security",
+                "government",
+                "al_nazra",
+                "infrastructure",
+            )
+        }
+        for region_id, region in state.regions.items()
+    }
 
     commander_user_id = role_owners.get("commander")
 
@@ -836,13 +851,32 @@ def resolve_turn(
     # Фаза 10: победа/поражение.
     check_endings(pack, state, report)
 
+    for region_id, region in state.regions.items():
+        before = snapshot.get(region_id, {})
+        changes = {
+            stat: getattr(region, stat) - before.get(stat, getattr(region, stat))
+            for stat in (
+                "economy",
+                "trust",
+                "security",
+                "government",
+                "al_nazra",
+                "infrastructure",
+            )
+        }
+        changes = {stat: delta for stat, delta in changes.items() if delta}
+        if changes:
+            report.region_deltas[region_id] = changes
+
     # Сброс на следующий ход.
     state.submissions = {}
     state.event_votes = {}
     state.event_id = ""
     state.event_region_id = ""
     state.priority = None
-    state.mobilization_active = False
+    if state.mobilization_turns_left > 0:
+        state.mobilization_turns_left -= 1
+    state.mobilization_active = state.mobilization_turns_left > 0
     state.cost_discount = state.pending_cost_discount
     state.pending_cost_discount = 0
 
@@ -926,10 +960,6 @@ def apply_action_effects(pack, state, report, role_id, action, region, effects) 
 
     if action.next_cost_discount:
         state.pending_cost_discount += action.next_cost_discount
-
-    if "mobilize" in action.tags:
-        state.mobilization_used = True
-        state.mobilization_active = True
 
     region_name = region.name if region else "штаб"
     if not any(
