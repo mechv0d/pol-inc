@@ -164,6 +164,7 @@ class TurnReport:
     al_nazra_notes: list[str] = field(default_factory=list)
     income: int = 0
     upkeep_paid: int = 0
+    income_parts: dict[str, int] = field(default_factory=dict)
     result: str = ""
     result_reason: str = ""
 
@@ -1183,18 +1184,23 @@ def run_global_passives(pack, state, report, support_start: float) -> None:
     ) - round_half_up(support_start)
 
     avg_economy = average(region.economy for region in state.regions.values())
-    income = (
-        settings.base_income
-        + math.floor(avg_economy / 10)
-        + flags.get("income_bonus", 0)
-        + state.pending_income_bonus
-        - math.floor(state.corruption / 20)
-    )
+    eco_part = math.floor(avg_economy / 10)
+    tech_part = flags.get("income_bonus", 0) + state.pending_income_bonus
+    corr_part = math.floor(state.corruption / 20)
+    income = settings.base_income + eco_part + tech_part - corr_part
     upkeep_total = sum(item.cost for item in state.upkeep)
     income += state.pending_income - upkeep_total
     state.budget += income
     report.income = income
     report.upkeep_paid = upkeep_total
+    report.income_parts = {
+        "base": settings.base_income,
+        "economy": eco_part,
+        "tech": tech_part,
+        "corruption": -corr_part,
+        "upkeep": -upkeep_total,
+        "queued": state.pending_income,
+    }
     state.pending_income = 0
     state.pending_income_bonus = 0
 

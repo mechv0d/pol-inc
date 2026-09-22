@@ -270,6 +270,14 @@ def format_report(report: TurnReport, pack: TarbinGamePack | None = None) -> lis
         lines.append(
             f"Доход: {format_delta(report.income)} млн (содержание: {report.upkeep_paid} млн)"
         )
+        if report.income_parts:
+            parts = report.income_parts
+            lines.append(
+                f"База {parts.get('base', 0)} + экономика {parts.get('economy', 0)} "
+                f"+ технологии {parts.get('tech', 0)} − коррупция "
+                f"{abs(parts.get('corruption', 0))} − содержание "
+                f"{abs(parts.get('upkeep', 0))} + поступления {parts.get('queued', 0)}."
+            )
         lines.append("")
     if report.region_notes:
         lines.append("<b>Регионы:</b>")
