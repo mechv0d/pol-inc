@@ -80,6 +80,7 @@ class TarbinSession:
     role_owners: dict[str, int] = field(default_factory=dict)
     next_ready: set[int] = field(default_factory=set)
     menu_message_ids: dict[int, int] = field(default_factory=dict)
+    last_report: TurnReport | None = None
 
     def owner_of(self, role_id: str) -> TarbinPlayer | None:
         user_id = self.role_owners.get(role_id)
@@ -468,7 +469,7 @@ class TarbinSessionManager:
                 raise ActionError("Действие не найдено.")
 
             if "mobilize" in action.tags:
-                state.mobilization_used = True
+                state.mobilization_turns_left = 3
                 state.mobilization_active = True
 
             state.submissions.setdefault(role_id, []).append(
@@ -507,6 +508,23 @@ class TarbinSessionManager:
                 )
             )
 
+            return self._is_ready_locked(session)
+
+    async def pass_role(self, user_id: int, role_id: str) -> bool:
+        async with self._lock:
+            session, player, state = self._player_state_locked(user_id)
+            self._require_role_owner(session, player, role_id)
+
+            if state is None or session.pack is None:
+                raise ActionError("Игра сейчас не запущена.")
+
+            used = len(state.submissions.get(role_id, []))
+            if used >= slots_for_role(session.pack, state):
+                raise ActionError("У роли больше нет действий в этом ходу.")
+
+            state.submissions.setdefault(role_id, []).append(
+                Submission(role_id=role_id, kind="pass")
+            )
             return self._is_ready_locked(session)
 
     async def reset_turn(self, user_id: int) -> None:
