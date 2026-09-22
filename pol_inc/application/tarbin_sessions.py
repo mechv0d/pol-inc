@@ -26,6 +26,7 @@ from pol_inc.domain.tarbin_game import (
     GameState,
     Submission,
     TurnReport,
+    effective_cost,
     new_game_state,
     pick_event_for_turn,
     resolve_turn,
@@ -665,11 +666,16 @@ class TarbinSessionManager:
         options: list[ActionOption] = []
 
         for action in session.pack.actions_for_role(role_id):
+            probe_region = ""
+            if action.target == "region" and state.regions:
+                probe_region = next(iter(state.regions))
             cost, error = validate_action_submit(
-                session.pack, state, role_id, action.id, ""
+                session.pack, state, role_id, action.id, probe_region
             )
             if error == "Укажите корректный регион.":
                 error = ""
+            if error and cost == 0:
+                cost = effective_cost(session.pack, state, role_id, action.cost)
 
             options.append(
                 ActionOption(
@@ -787,8 +793,15 @@ class TarbinSessionManager:
 
     def _resolve_locked(self, session: TarbinSession) -> TurnReport:
         assert session.pack is not None and session.state is not None
+        player_names = {
+            user_id: player.public_name for user_id, player in session.players.items()
+        }
         return resolve_turn(
-            session.pack, session.state, dict(session.role_owners), self._rng
+            session.pack,
+            session.state,
+            dict(session.role_owners),
+            self._rng,
+            player_names,
         )
 
     def _session_by_chat_locked(self, chat_id: int) -> TarbinSession:
